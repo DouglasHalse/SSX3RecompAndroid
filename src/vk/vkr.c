@@ -24,6 +24,25 @@
 #include <time.h>
 #endif
 
+/* Android ships the Vulkan 1.3 headers, and the NDK's libvulkan.so stub
+ * exports neither the Vulkan 1.4 core push-descriptor command nor its KHR
+ * alias. The layout flag has the same value under the KHR name; the command
+ * itself is resolved from the device after creation (VK_KHR_push_descriptor,
+ * which every driver this runs on has). */
+#if defined(__ANDROID__) && !defined(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT)
+#define VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT \
+        VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR
+#define SSX3_VK_PUSH_DESC_EXT 1
+static PFN_vkCmdPushDescriptorSetKHR ssx3_push_desc;
+static void vkCmdPushDescriptorSet(VkCommandBuffer cb, VkPipelineBindPoint bp,
+                                   VkPipelineLayout lay, uint32_t set,
+                                   uint32_t n, const VkWriteDescriptorSet *w)
+{
+    if (ssx3_push_desc)
+        ssx3_push_desc(cb, bp, lay, set, n, w);
+}
+#endif
+
 static double vkr_now_ms(void)
 {
 #ifdef _WIN32
@@ -1027,7 +1046,11 @@ VkrContext *vkr_create(void)
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+#ifdef SSX3_VK_PUSH_DESC_EXT
+    static const char *s_push_ext[] = { "VK_KHR_push_descriptor" };
+#else
     VkPhysicalDeviceVulkan14Features f14 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+#endif
     VkDeviceCreateInfo di = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -1039,7 +1062,13 @@ VkrContext *vkr_create(void)
     c->bc7 = -1;
     c->tex_mips = -1;
     c->cur_off = -1;
-    app.pApplicationName = "ssx3"; app.apiVersion = VK_API_VERSION_1_4;
+    app.pApplicationName = "ssx3";
+#ifdef __ANDROID__
+    /* Devices here are 1.3 (push descriptors come from the extension). */
+    app.apiVersion = VK_API_VERSION_1_3;
+#else
+    app.apiVersion = VK_API_VERSION_1_4;
+#endif
     ii.pApplicationInfo = &app;
     if (vkCreateInstance(&ii, NULL, &c->inst) != VK_SUCCESS) goto fail;
     if (vkEnumeratePhysicalDevices(c->inst, &n, devs) < 0 || !n) goto fail;
@@ -1125,10 +1154,24 @@ VkrContext *vkr_create(void)
         di.pEnabledFeatures = &en;
     }
     f13.dynamicRendering = VK_TRUE; f13.synchronization2 = VK_TRUE;
+#ifdef SSX3_VK_PUSH_DESC_EXT
+    /* Push descriptors through VK_KHR_push_descriptor (Android, Vulkan 1.3). */
+    di.enabledExtensionCount   = 1;
+    di.ppEnabledExtensionNames = s_push_ext;
+#else
     f14.pushDescriptor = VK_TRUE;
     f13.pNext = &f14;
+#endif
     di.pNext = &f13; di.queueCreateInfoCount = 1; di.pQueueCreateInfos = &qi;
     if (vkCreateDevice(c->phys, &di, NULL, &c->dev) != VK_SUCCESS) goto fail;
+#ifdef SSX3_VK_PUSH_DESC_EXT
+    ssx3_push_desc = (PFN_vkCmdPushDescriptorSetKHR)
+        vkGetDeviceProcAddr(c->dev, "vkCmdPushDescriptorSetKHR");
+    if (!ssx3_push_desc) {
+        fprintf(stderr, "[VKR] VK_KHR_push_descriptor is not available\n");
+        goto fail;
+    }
+#endif
     vkGetDeviceQueue(c->dev, c->qfam, 0, &c->queue);
     pci.queueFamilyIndex = c->qfam;
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;

@@ -92,3 +92,7 @@ dist/
 hd-textures/.sig_cache.npz
 disk
 build-web/
+
+# Android builds
+build-android/
+build-android-x64/

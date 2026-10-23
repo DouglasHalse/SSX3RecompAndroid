@@ -87,6 +87,18 @@ set(GAME_SOURCES
 
 if(WIN32)
     add_executable(${PROJECT_NAME} WIN32 ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
+elseif(ANDROID)
+    # The recompiled guest is plain C, so it builds for arm64 unchanged. The
+    # APK loads this as libmain.so: SDL2's Java activity (SDLActivity) calls
+    # SDL_main in it. main.c's main() is renamed so src/android/sdl_main.c can
+    # be the SDL_main entry that owns SDL video and starts the game on a
+    # worker thread.
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    add_library(${PROJECT_NAME} SHARED ${GAME_SOURCES} ${RECOMP_GEN_SOURCES}
+                src/android/sdl_main.c)
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "main")
+    set_source_files_properties(src/main.c PROPERTIES COMPILE_DEFINITIONS "main=ssx3_main")
+    set_source_files_properties(src/android/sdl_main.c PROPERTIES COMPILE_DEFINITIONS "")
 else()
     add_executable(${PROJECT_NAME} ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
 endif()
@@ -122,6 +134,9 @@ if(WIN32)
         # function's symbol, i.e. to the guest function that faulted.
         dbghelp
     )
+elseif(ANDROID)
+    # libmain.so carries the game; SDL2 and Vulkan are its only outside deps.
+    target_link_libraries(${PROJECT_NAME} PRIVATE m log android dl)
 elseif(EMSCRIPTEN)
     # main() runs on a worker (PROXY_TO_PTHREAD): guest code blocks freely and
     # the browser thread stays free for input, audio and presenting. Guest
@@ -207,7 +222,10 @@ endif()
 # ── launcher.exe ─────────────────────────────────────────────────
 # Settings GUI that starts the game (src/launcher/launcher.c): game folder
 # picker with a check of default.xbe, display options, controllers.
-if(WIN32)
+if(ANDROID)
+    # No launcher on Android: there is no folder picker, and the game folder is
+    # fixed inside the app's own storage (src/android/sdl_main.c sets it up).
+elseif(WIN32)
     add_executable(ssx3_launcher WIN32 src/launcher/launcher.c)
     set_target_properties(ssx3_launcher PROPERTIES OUTPUT_NAME launcher)
     target_link_libraries(ssx3_launcher PRIVATE comctl32 ole32 shell32 xinput)

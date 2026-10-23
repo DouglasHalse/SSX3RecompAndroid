@@ -29,8 +29,13 @@
 #include <dirent.h>
 #include <pthread.h>
 #if !defined(__EMSCRIPTEN__)
-#include <execinfo.h>
 #include <sys/syscall.h>
+#endif
+#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
+/* Bionic has no execinfo.h (no backtrace()): on Android the dumps keep the
+ * guest registers and stack, and skip the native backtrace. */
+#include <execinfo.h>
+#define SSX3_HAVE_BACKTRACE 1
 #endif
 
 #include "recomp/gen/recomp_types.h"
@@ -48,15 +53,19 @@ static volatile sig_atomic_t s_dump_done;
 
 static void dump_handler(int sig)
 {
+#ifdef SSX3_HAVE_BACKTRACE
     void *bt[48];
     int n;
+#endif
 
     (void)sig;
     fprintf(stderr, "[THREAD %ld] eax=%08X ecx=%08X edx=%08X ebx=%08X esp=%08X esi=%08X edi=%08X\n",
             (long)syscall(SYS_gettid), g_eax, g_ecx, g_edx, g_ebx, g_esp, g_esi, g_edi);
     print_guest_stack();
+#ifdef SSX3_HAVE_BACKTRACE
     n = backtrace(bt, 48);
     backtrace_symbols_fd(bt, n, 2);
+#endif
     s_dump_done = 1;
 }
 

@@ -601,7 +601,10 @@ static void install_crash_handler(void) {}
 
 #include <signal.h>
 #include <ucontext.h>
-#include <execinfo.h>
+#ifndef __ANDROID__
+#include <execinfo.h>          /* no backtrace() in Bionic: Android skips it */
+#define SSX3_HAVE_BACKTRACE 1
+#endif
 #include <unistd.h>
 #include <sys/prctl.h>
 #include <sys/mman.h>
@@ -691,14 +694,77 @@ static int ac97_write(void *uc, uintptr_t fault, uint32_t *insn)
     return ok;
 }
 
+#if defined(__ANDROID__)
+/* /proc/self/maps lookup: a crash inside recompiled code reports a host pc and
+ * a host fault address, and neither means anything without the module and the
+ * offset into it. Cheap enough to do in a signal handler (reads a text file). */
+static int maps_lookup(uintptr_t a, char *out, size_t out_size)
+{
+    FILE *f = fopen("/proc/self/maps", "r");
+    char line[512];
+
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long lo, hi;
+        if (sscanf(line, "%lx-%lx", &lo, &hi) == 2 && a >= lo && a < hi) {
+            char *nl = strchr(line, '\n');
+            if (nl)
+                *nl = 0;
+            snprintf(out, out_size, "%s", line);
+            fclose(f);
+            return 1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+/* Walk the host stack words above SP and print the ones that land in executable
+ * code: recompiled guest functions run natively, so the guest call chain is the
+ * host call chain. */
+static void print_native_stack(const ucontext_t *uc)
+{
+#if defined(__aarch64__)
+    uintptr_t sp = (uintptr_t)uc->uc_mcontext.sp;
+#elif defined(__x86_64__)
+    uintptr_t sp = (uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+#else
+    uintptr_t sp = 0;
+#endif
+    int i, printed = 0;
+
+    if (!sp)
+        return;
+    fprintf(stderr, "  host stack (SP=%p):\n", (void *)sp);
+    for (i = 0; i < 48 && printed < 24; i++) {
+        char map[512];
+        uintptr_t w;
+
+        if (!maps_lookup(sp + (uintptr_t)i * sizeof(uintptr_t), map, sizeof map))
+            break;                     /* SP left the stack mapping */
+        w = ((const uintptr_t *)sp)[i];
+        if (!maps_lookup(w, map, sizeof map))
+            continue;
+        if (!strstr(map, " r-xp ") && !strstr(map, " r-xs "))
+            continue;                  /* keep only executable targets */
+        fprintf(stderr, "    [sp+%3d] %p  %s\n", i * (int)sizeof(uintptr_t),
+                (void *)w, map);
+        printed++;
+    }
+}
+#endif
+
 /* Trapped device registers are serviced here (src/mmio_posix.c); anything else
  * is a crash and gets reported. */
 static void segv_handler(int sig, siginfo_t *si, void *uc_)
 {
     ucontext_t *uc = (ucontext_t *)uc_;
-    void *bt[32];
     uintptr_t fault = (uintptr_t)si->si_addr;
+#ifdef SSX3_HAVE_BACKTRACE
+    void *bt[32];
     int n;
+#endif
 #if defined(__aarch64__)
     uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc;
 #else
@@ -723,10 +789,22 @@ static void segv_handler(int sig, siginfo_t *si, void *uc_)
             g_ebx, g_esi, g_edi);
     fprintf(stderr, "  Xbox VA of fault: 0x%08X\n",
             (uint32_t)(fault - (uintptr_t)g_xbox_mem_offset));
+#if defined(__ANDROID__)
+    {
+        char map[512];
+        if (maps_lookup(pc, map, sizeof map))
+            fprintf(stderr, "  pc in: %s\n", map);
+        if (maps_lookup(fault, map, sizeof map))
+            fprintf(stderr, "  fault in: %s\n", map);
+        print_native_stack(uc);
+    }
+#endif
     print_guest_stack();
     journal_crash_context();
+#ifdef SSX3_HAVE_BACKTRACE
     n = backtrace(bt, 32);
     backtrace_symbols_fd(bt, n, 2);
+#endif
     session_end();
     _exit(139);
 }

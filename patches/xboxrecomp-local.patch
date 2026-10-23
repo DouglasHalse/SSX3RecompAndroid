@@ -13,10 +13,10 @@ index 0bd4ebd..70568cb 100644
      # Linux: platform layer (Win32 primitives on POSIX) + SDL2 audio + libm
      find_package(SDL2 REQUIRED)
 diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
-index 258048c..9760f17 100644
+index 258048c..44a718f 100644
 --- a/src/apu/apu_core.c
 +++ b/src/apu/apu_core.c
-@@ -20,6 +20,7 @@
+@@ -20,11 +20,19 @@
   */
  
  #include "apu_state.h"
@@ -24,7 +24,19 @@ index 258048c..9760f17 100644
  #include "apu.h"
  #include "apu_xaudio2.h"
  #include "fpconv.h"
-@@ -77,10 +78,10 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
+ #include "../kernel/xbox_memory_layout.h"   /* XBOX_WORKER_STACK_TOP */
+ 
++#if defined(__ANDROID__)
++#include <sys/resource.h>
++#endif
++#if !defined(_WIN32)
++#include <pthread.h>
++#endif
++
+ /* ============================================================
+  * Globals
+  * ============================================================ */
+@@ -77,10 +85,10 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
  {
      uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
      if (a >= g_xbox_image_lo && a < g_xbox_image_hi)
@@ -38,7 +50,7 @@ index 258048c..9760f17 100644
  }
  
  /* The interrupt line, as the frame thread sees it. update_irq used to call
-@@ -149,8 +150,8 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -149,8 +157,8 @@ static void apu_deliver_irq(MCPXAPUState *d)
      kint = xbox_GetConnectedInterrupt(APU_VECTOR);
      if (!kint)
          return;
@@ -49,7 +61,7 @@ index 258048c..9760f17 100644
      fn = routine ? recomp_lookup(routine) : NULL;
      if (!fn)
          return;
-@@ -168,9 +169,9 @@ static void apu_deliver_irq(MCPXAPUState *d)
+@@ -168,9 +176,9 @@ static void apu_deliver_irq(MCPXAPUState *d)
      qemu_mutex_unlock(&d->lock);
      g_esp = XBOX_WORKER_STACK_TOP(slot);
      g_eax = g_ecx = g_edx = g_ebx = g_esi = g_edi = 0;
@@ -62,7 +74,7 @@ index 258048c..9760f17 100644
      { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
      xbox_worker_stack_free(slot);
      qemu_mutex_lock(&d->lock);
-@@ -319,12 +320,15 @@ void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
+@@ -319,12 +327,15 @@ void mcpx_apu_monitor_init(MCPXAPUState *d, Error **errp)
      d->monitor.queued_bytes_low = 1024;
      d->monitor.queued_bytes_high = 3072;
  
@@ -83,7 +95,7 @@ index 258048c..9760f17 100644
  
      WAVEFORMATEX wfx = { 0 };
      wfx.wFormatTag      = WAVE_FORMAT_PCM;
-@@ -377,12 +381,87 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
+@@ -377,12 +388,99 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
              g_waveout.frames_written);
  }
  
@@ -91,6 +103,18 @@ index 258048c..9760f17 100644
 + * holds the voice processor's 256 samples (8 VP frames of 32, written by
 + * mcpx_apu_dsp_frame) and must be kept, not cleared. */
 +static int g_vp_frame;
++
++/* Time split for the [APU-LEVEL] line: how much of each second the frame
++ * thread spends inside the frame and how much of that is the submit into SDL
++ * (which locks the audio device and can block behind its callback thread). */
++static int64_t g_frame_us, g_submit_us;
++static int64_t g_iter_us, g_irq_us;
++static int64_t g_thr_us, g_upd_us, g_idle_us;
++static int g_iter_count;
++
++/* Defined in apu_vp.c: guest threads blocked on the APU lock (voice_lock no
++ * longer takes it, so this is normally zero). */
++extern volatile long g_apu_lock_waiters;
 +
 +/* RECOMP_APU_LEVEL=1: once a second, the peak level of what was submitted
 + * and how much of it came from the voice processor. */
@@ -102,21 +126,8 @@ index 258048c..9760f17 100644
 +    int i, p = 0;
 +    if (on < 0)
 +        on = getenv("RECOMP_APU_LEVEL") != NULL;
-+    if (!on) {
-+        /* without the level report: underruns and drops (heard as clicks
-+         * and gaps) once every 10 s when there were any */
-+        static int64_t last_check;
-+        int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-+        if (now - last_check >= 10000) {
-+            int under, drops, minq, waits, refills;
-+            last_check = now;
-+            xa2_take_stats(&under, &drops, &minq, &waits, &refills);
-+            if (under || drops)
-+                fprintf(stderr, "[XA2] audio output: %d underruns, %d dropped buffers in the last 10 s\n",
-+                        under, drops);
-+        }
++    if (!on)
 +        return;
-+    }
 +    for (i = 0; i < n * 2; i++) {
 +        int v = buf[i] < 0 ? -buf[i] : buf[i];
 +        if (v > p) p = v;
@@ -128,9 +139,18 @@ index 258048c..9760f17 100644
 +        last = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 +        int under, drops, minq, waits, refills;
 +        xa2_take_stats(&under, &drops, &minq, &waits, &refills);
-+        fprintf(stderr, "[APU-LEVEL] peak %d (vp peak %d) | buffers %d (vp %d) | underruns %d drops %d"
-+                " waits %d refills %d min queued %d\n", peak, vp_peak, bufs, vp_bufs, under, drops,
-+                waits, refills, minq);
++        fprintf(stderr, "[APU-LEVEL] peak %d (vp peak %d) | buffers %d (vp %d) | frames/s %d"
++                " | underruns %d drops %d waits %d refills %d min queued %d | util %.2f"
++                " | frame %d ms/s submit %d ms/s | iter %d/s %d ms/s irq %d ms/s"
++                " | thr %d upd %d idle %d\n",
++                peak, vp_peak, bufs, vp_bufs, g_dbg.frames_processed, under, drops,
++                waits, refills, minq, g_dbg.utilization,
++                (int)(g_frame_us / 1000), (int)(g_submit_us / 1000),
++                g_iter_count, (int)(g_iter_us / 1000), (int)(g_irq_us / 1000),
++                (int)(g_thr_us / 1000), (int)(g_upd_us / 1000), (int)(g_idle_us / 1000));
++        g_frame_us = g_submit_us = g_iter_us = g_irq_us = 0;
++        g_thr_us = g_upd_us = g_idle_us = 0;
++        g_iter_count = 0;
 +        peak = vp_peak = bufs = vp_bufs = 0;
 +    }
 +}
@@ -164,14 +184,18 @@ index 258048c..9760f17 100644
 +        apu_level_note(&d->monitor.frame_buf[0][0], 256, 1);
 +        if (g_audio_muted)
 +            memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
-+        xa2_submit_samples(&d->monitor.frame_buf[0][0], 256);
++        {
++            int64_t s0 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
++            xa2_submit_samples(&d->monitor.frame_buf[0][0], 256);
++            g_submit_us += qemu_clock_get_us(QEMU_CLOCK_REALTIME) - s0;
++        }
 +        return;
 +    }
 +
      /* XAudio2 path: render and submit a buffer */
      if (xa2_is_active()) {
          int buf_size = xa2_get_buffer_size();
-@@ -413,12 +492,48 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
+@@ -413,12 +511,48 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
              remaining -= chunk;
          }
  
@@ -220,7 +244,7 @@ index 258048c..9760f17 100644
      int idx = g_waveout.next_buf;
      WAVEHDR *hdr = &g_waveout.hdrs[idx];
  
-@@ -483,10 +598,32 @@ static void throttle(MCPXAPUState *d)
+@@ -483,10 +617,39 @@ static void throttle(MCPXAPUState *d)
  
      int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
  
@@ -231,9 +255,16 @@ index 258048c..9760f17 100644
 +     * and the voice processor ran at ~85% of real time -- audible as gaps
 +     * once its output reached the speakers. Catching up instead keeps the
 +     * average at 48 kHz; the output queue absorbs the bursts. */
++    /* Resync only when the thread really stalled (a pause, a long deschedule),
++     * not for the few ms of lateness each period accumulates. Resetting the
++     * deadline threw that debt away roughly every 0.26 s -- exactly the audio
++     * time the voice processor then never produced, so it ran at ~80% of real
++     * time and the speakers heard gaps: choppy sound that also drags. Keep the
++     * debt instead; while behind, the loop below does not wait at all and pays
++     * it back, which keeps the average at 48 kHz. */
      if (d->next_frame_time_us == 0 ||
 -        now_us - d->next_frame_time_us > EP_FRAME_US) {
-+        now_us - d->next_frame_time_us > 12 * EP_FRAME_US) {
++        now_us - d->next_frame_time_us > 1000000) {   /* > 1 s: give up on the debt */
          d->next_frame_time_us = now_us;
      }
 +#if defined(_WIN32)
@@ -246,15 +277,15 @@ index 258048c..9760f17 100644
 +    }
 +#endif
 +
-+    /* The sound card's clock, not just the system's: with the output queue
-+     * filling up (10+ of its 12 buffers) this side is ahead -- take one
-+     * frame's time longer, waiting below with the lock released. */
-+    if (xa2_is_active() && xa2_queued() >= 10)
-+        d->next_frame_time_us += EP_FRAME_US;
++    /* The output queue is not probed here. SDL_GetQueuedAudioSize takes the
++     * audio device's lock, which SDL's own AAudio thread holds while it waits
++     * for the device: ~1 ms per call, a fifth of the 5.3 ms frame, which alone
++     * cost that fifth of the audio. The submit side already refuses to queue
++     * more than 12 buffers, so a full queue is handled where it is cheap. */
  
      while (!d->pause_requested) {
          now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-@@ -530,7 +667,9 @@ static void se_frame(MCPXAPUState *d)
+@@ -530,7 +693,9 @@ static void se_frame(MCPXAPUState *d)
  
      mcpx_apu_vp_frame(d, mixbins);
      mcpx_apu_dsp_frame(d, mixbins);
@@ -264,7 +295,7 @@ index 258048c..9760f17 100644
  
      d->ep_frame_div++;
  
-@@ -544,6 +683,12 @@ static void se_frame(MCPXAPUState *d)
+@@ -544,21 +709,50 @@ static void se_frame(MCPXAPUState *d)
  static void *mcpx_apu_frame_thread(void *arg)
  {
      MCPXAPUState *d = MCPX_APU_DEVICE(arg);
@@ -273,29 +304,117 @@ index 258048c..9760f17 100644
 +     * the output queue's cushion is used up, and the game's own threads
 +     * keep every core busy. */
 +    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
++#elif defined(__ANDROID__)
++    /* THREAD_PRIORITY_AUDIO (-16). This thread is the sound card's clock; on a
++     * phone the game, renderer and Vulkan driver threads otherwise preempt it
++     * often enough that it loses a millisecond or two per 5.3 ms frame. Apps
++     * may lower nice for their own threads; if the platform refuses, say so
++     * once and carry on. */
++    if (setpriority(PRIO_PROCESS, 0, -16) != 0)
++        fprintf(stderr, "[APU] frame thread priority unchanged (setpriority failed)\n");
++    else
++        fprintf(stderr, "[APU] frame thread at audio priority (-16)\n");
++#endif
++#if !defined(_WIN32)
++    /* Visible in /proc/<pid>/task/<tid>/comm and top -H: the audio clock is the
++     * first thread to look at when the sound stutters. */
++    pthread_setname_np(pthread_self(), "apu-frame");
 +#endif
      qemu_mutex_lock(&d->lock);
  
      while (!qatomic_read(&d->exiting)) {
-@@ -605,6 +750,17 @@ static void *mcpx_apu_frame_thread(void *arg)
-          * off every USB interrupt. */
-         qemu_mutex_unlock(&d->lock);
-         SwitchToThread();
++        int64_t t_iter0 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
++        g_iter_count++;
+         if (d->pause_requested && !g_test_tone.active && !g_mixer_active_count) {
++            int64_t iw = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+             d->is_idle = true;
+             qemu_cond_signal(&d->idle_cond);
+             qemu_cond_wait(&d->cond, &d->lock);
+             d->is_idle = false;
++            g_idle_us += qemu_clock_get_us(QEMU_CLOCK_REALTIME) - iw;
+             continue;
+         }
+ 
+         /* Always run the audio output loop — the software mixer and test tone
+          * need continuous frame delivery regardless of APU register state.
+          * The VP/DSP pipeline (se_frame) only runs when registers allow it. */
+-        throttle(d);
 +        {
-+            /* Hand over, not just offer: a guest thread waiting in
-+             * voice_lock (with the guest CPU held) did not always get in at
-+             * this brief release -- waits of ~26 ms were seen. Yield until
-+             * it has the lock, at most 2 ms. */
-+            extern volatile long g_apu_lock_waiters;
-+            int64_t until = qemu_clock_get_us(QEMU_CLOCK_REALTIME) + 2000;
-+            while (qatomic_read(&g_apu_lock_waiters) > 0
-+                   && qemu_clock_get_us(QEMU_CLOCK_REALTIME) < until)
-+                SwitchToThread();
++            int64_t tw = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
++            throttle(d);
++            g_thr_us += qemu_clock_get_us(QEMU_CLOCK_REALTIME) - tw;
 +        }
-         qemu_mutex_lock(&d->lock);
+ 
+         /* The doorbell ack stands in for the GP DSP, which on hardware runs
+          * whatever the front end is doing. Tying it to se_frame stopped it
+@@ -576,7 +770,9 @@ static void *mcpx_apu_frame_thread(void *arg)
+ 
+         if (apu_active && !g_test_tone.active) {
+             /* Full pipeline: VP voices → DSP → monitor → waveOut */
++            int64_t f0 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+             se_frame(d);
++            g_frame_us += qemu_clock_get_us(QEMU_CLOCK_REALTIME) - f0;
+         } else {
+             /* Lightweight: just monitor frame (test tone + software mixer) */
+             mcpx_apu_monitor_frame(d);
+@@ -588,24 +784,42 @@ static void *mcpx_apu_frame_thread(void *arg)
+          * the interrupt line. Nothing here ever did, so the line never rose
+          * even before there was anything to deliver it to. */
+         if (d->set_irq) {
++            int64_t u0 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+             update_irq(d);
++            g_upd_us += qemu_clock_get_us(QEMU_CLOCK_REALTIME) - u0;
+             d->set_irq = false;
+         }
+-        apu_deliver_irq(d);
++        {
++            int64_t i0 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
++            apu_deliver_irq(d);
++            g_irq_us += qemu_clock_get_us(QEMU_CLOCK_REALTIME) - i0;
++        }
+ 
+-        /* Let the guest in once per frame.
+-         *
+-         * The thread holds d->lock for its whole loop and only drops it inside
+-         * throttle()'s wait. Once voices really play, processing can run
+-         * behind real time, throttle never waits, and the lock is never
+-         * released -- while every VOICE_ON/OFF/RELEASE the title writes needs
+-         * it (voice_lock). A critical section is not fair, so the title's
+-         * thread starved there indefinitely: Burnout 3 froze on its vehicle
+-         * select, blocked in voice_lock at raised IRQL, which in turn held
+-         * off every USB interrupt. */
+-        qemu_mutex_unlock(&d->lock);
+-        SwitchToThread();
+-        qemu_mutex_lock(&d->lock);
++        /* Let the guest in once per frame -- but only when something is
++         * actually waiting for the APU lock. voice_lock is lock-free now, so
++         * normally nothing is, and the handover is not free: the yield costs
++         * ~0.8 ms per frame on a phone, a fifth of the audio frame, which was
++         * the last thing keeping the voice processor below real time. */
++        if (qatomic_read(&g_apu_lock_waiters) > 0) {
++            qemu_mutex_unlock(&d->lock);
++            SwitchToThread();
++            {
++                /* Hand over, not just offer: a guest thread waiting in
++                 * voice_lock (with the guest CPU held) did not always get in at
++                 * this brief release -- waits of ~26 ms were seen. Yield until
++                 * it has the lock, but never past the frame clock's slack. */
++                extern volatile long g_apu_lock_waiters;
++                int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
++                int64_t until = now + 2000;
++                if (d->next_frame_time_us > 0 && d->next_frame_time_us < until)
++                    until = d->next_frame_time_us;
++                while (qatomic_read(&g_apu_lock_waiters) > 0
++                       && qemu_clock_get_us(QEMU_CLOCK_REALTIME) < until)
++                    SwitchToThread();
++            }
++            qemu_mutex_lock(&d->lock);
++        }
++        g_iter_us += qemu_clock_get_us(QEMU_CLOCK_REALTIME) - t_iter0;
      }
  
-@@ -693,6 +849,14 @@ MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr)
+     qemu_mutex_unlock(&d->lock);
+@@ -693,6 +907,14 @@ MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr)
          warn_reportf_err(local_err, "mcpx_apu_monitor_init failed: ");
      }
  
@@ -409,28 +528,58 @@ index 7156be9..622dbb0 100644
                      else       left  += mixbins[b][i];
                  }
 diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
-index f45b42b..d03ef75 100644
+index f45b42b..440ecf3 100644
 --- a/src/apu/apu_vp.c
 +++ b/src/apu/apu_vp.c
-@@ -140,10 +140,16 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
+@@ -140,20 +140,36 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
      set_notify_status(d, v, notifier, NV1BA0_NOTIFICATION_STATUS_DONE_SUCCESS);
  }
  
-+/* Guest threads waiting for d->lock in voice_lock: the frame thread hands
-+ * the lock over to them at its next frame boundary (apu_core.c). */
++/* Guest threads waiting for d->lock: the frame thread hands the lock over to
++ * them at its next frame boundary (apu_core.c). voice_lock no longer takes the
++ * lock (see below), so this stays at zero; the frame thread still tests it. */
 +volatile long g_apu_lock_waiters;
 +
  static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
  {
-     assert(v < MCPX_HW_MAX_VOICES);
-+    qatomic_fetch_add(&g_apu_lock_waiters, 1);
-     qemu_mutex_lock(&d->lock);
-+    qatomic_fetch_add(&g_apu_lock_waiters, -1);
- 
+-    assert(v < MCPX_HW_MAX_VOICES);
+-    qemu_mutex_lock(&d->lock);
+-
      uint64_t mask = 1ULL << (v % 64);
-     if (lock) {
+-    if (lock) {
+-        d->vp.voice_locked[v / 64] |= mask;
+-    } else {
+-        d->vp.voice_locked[v / 64] &= ~mask;
+-    }
++    volatile uint64_t *slot = &d->vp.voice_locked[v / 64];
+ 
+-    qemu_cond_signal(&d->cond);
+-    qemu_mutex_unlock(&d->lock);
++    assert(v < MCPX_HW_MAX_VOICES);
++    /* This sets or clears one bit in the voice-locked map -- nothing else.
++     * Taking the APU mutex for it was the guest's hot path: DirectSound locks
++     * and unlocks a voice around every update, so the map was held for the
++     * greater part of every second, and the frame thread (the sound card's
++     * clock) waited for that mutex and produced ~20% less audio than real time
++     * -- heard as sound that drags and breaks up. The frame side reads the map
++     * with qatomic_read, so a voice that changes state mid-frame is just the
++     * timing the hardware has. */
++#if defined(_MSC_VER)
++    if (lock)
++        _InterlockedOr64((volatile __int64 *)slot, (__int64)mask);
++    else
++        _InterlockedAnd64((volatile __int64 *)slot, (__int64)~mask);
++#else
++    if (lock)
++        __sync_fetch_and_or(slot, mask);
++    else
++        __sync_fetch_and_and(slot, ~mask);
++#endif
+ }
+ 
+ static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
 diff --git a/src/apu/apu_xaudio2.c b/src/apu/apu_xaudio2.c
-index cd69e57..e7e3053 100644
+index cd69e57..2c9a504 100644
 --- a/src/apu/apu_xaudio2.c
 +++ b/src/apu/apu_xaudio2.c
 @@ -11,8 +11,8 @@
@@ -554,7 +703,7 @@ index cd69e57..e7e3053 100644
      if (FAILED(hr)) {
          fprintf(stderr, "[XA2] CreateSourceVoice failed: 0x%08lX\n", hr);
          goto fail;
-@@ -87,8 +148,18 @@ int xa2_init(void)
+@@ -87,8 +148,8 @@ int xa2_init(void)
      g_xa2_initialized = 1;
      g_xa2_frames_written = 0;
  
@@ -562,20 +711,10 @@ index cd69e57..e7e3053 100644
 -            XA2_SAMPLE_RATE, XA2_NUM_BUFS, XA2_BUF_SAMPLES);
 +    fprintf(stderr, "[XA2] XAudio2 initialized (%d Hz %s 16-bit, %d x %d-sample buffers)\n",
 +            XA2_SAMPLE_RATE, g_xa2_ch == 6 ? "5.1" : "stereo", XA2_NUM_BUFS, XA2_BUF_SAMPLES);
-+    {
-+        /* what the default output device takes (the mix is mapped or
-+         * downmixed to it) */
-+        XAUDIO2_VOICE_DETAILS vd;
-+        DWORD mask = 0;
-+        IXAudio2MasteringVoice_GetVoiceDetails(g_xa2_master, &vd);
-+        IXAudio2MasteringVoice_GetChannelMask(g_xa2_master, &mask);
-+        fprintf(stderr, "[XA2] output device: %u channels at %u Hz (speaker mask 0x%lX)\n",
-+                (unsigned)vd.InputChannels, (unsigned)vd.InputSampleRate, (unsigned long)mask);
-+    }
      return 1;
  
  fail:
-@@ -135,14 +206,68 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
+@@ -135,14 +196,68 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
      int copy_samples;
      HRESULT hr;
  
@@ -646,7 +785,7 @@ index cd69e57..e7e3053 100644
  
      memset(&xbuf, 0, sizeof(xbuf));
      xbuf.AudioBytes = copy_samples * XA2_CHANNELS * sizeof(int16_t);
-@@ -156,17 +281,260 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
+@@ -156,17 +271,260 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
      return 1;
  }
  
@@ -676,11 +815,12 @@ index cd69e57..e7e3053 100644
 +    return (int)state.BuffersQueued;
 +}
 +
-+int xa2_get_buffer_size(void)
-+{
-+    return XA2_BUF_SAMPLES;
-+}
-+
+ int xa2_get_buffer_size(void)
+ {
+     return XA2_BUF_SAMPLES;
+ }
+ 
+-#else /* !_WIN32 -- POSIX stubs (no audio output yet) */
 +#elif defined(__EMSCRIPTEN__) /* -- ring in shared memory, AudioWorklet */
 +
 +/* The page's AudioWorklet (web/ in the game project) reads this ring straight
@@ -779,18 +919,22 @@ index cd69e57..e7e3053 100644
 +    g_web_underruns = g_web_drops = g_web_refills = 0;
 +    g_web_min_queued = 1 << 30;
 +}
-+
+ 
+-int  xa2_init(void)                                   { return 0; }
+-void xa2_shutdown(void)                               {}
+-int  xa2_is_active(void)                              { return 0; }
+-int  xa2_submit_samples(const int16_t *s, int n)      { (void)s; (void)n; return 0; }
+-int  xa2_get_buffer_size(void)                        { return 0; }
 +int xa2_queued(void)
 +{
 +    return g_web_on ? web_queued(g_web_buf_samples) : 0;
 +}
 +
- int xa2_get_buffer_size(void)
- {
-     return XA2_BUF_SAMPLES;
- }
- 
--#else /* !_WIN32 -- POSIX stubs (no audio output yet) */
++int xa2_get_buffer_size(void)
++{
++    return XA2_BUF_SAMPLES;
++}
++
 +#else /* !_WIN32 -- SDL2 audio queue */
 +
 +int xa2_channels(void) { return 2; }      /* 5.1: Windows (XAudio2) only */
@@ -835,12 +979,7 @@ index cd69e57..e7e3053 100644
 +            SDL_GetCurrentAudioDriver(), have.freq, have.samples);
 +    return 1;
 +}
- 
--int  xa2_init(void)                                   { return 0; }
--void xa2_shutdown(void)                               {}
--int  xa2_is_active(void)                              { return 0; }
--int  xa2_submit_samples(const int16_t *s, int n)      { (void)s; (void)n; return 0; }
--int  xa2_get_buffer_size(void)                        { return 0; }
++
 +void xa2_shutdown(void)
 +{
 +    if (!g_sdl_dev) return;
@@ -935,16 +1074,17 @@ index 83e652d..235e61f 100644
  
  #endif /* APU_XAUDIO2_H */
 diff --git a/src/d3d/CMakeLists.txt b/src/d3d/CMakeLists.txt
-index bb42c28..973b6c7 100644
+index bb42c28..71a21cc 100644
 --- a/src/d3d/CMakeLists.txt
 +++ b/src/d3d/CMakeLists.txt
-@@ -17,6 +17,12 @@ if(WIN32)
+@@ -17,6 +17,13 @@ if(WIN32)
      # Offline smoke test for the pure format layer (no D3D11 device needed).
      add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../tests/d3d8_smoke
                       ${CMAKE_CURRENT_BINARY_DIR}/d3d8_smoke)
-+elseif(EMSCRIPTEN)
-+    # The GL HLE path serves titles that call D3D through the kernel; SSX 3
-+    # links its own D3D and draws through the NV2A executor.
++elseif(EMSCRIPTEN OR ANDROID)
++    # No GL/desktop path here: SSX 3 links its own D3D and draws through the
++    # NV2A executor, so the D3D8 HLE library is not needed. Android would
++    # otherwise pull in libepoxy and a desktop GL context.
 +    add_library(xbox_d3d8 INTERFACE)
 +    target_include_directories(xbox_d3d8 INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 +    return()
@@ -1508,7 +1648,7 @@ index a91edbe..ae120d6 100644
  }
  
 diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
-index a045752..d2df24b 100644
+index a045752..84373a5 100644
 --- a/src/kernel/CMakeLists.txt
 +++ b/src/kernel/CMakeLists.txt
 @@ -21,6 +21,7 @@ set(KERNEL_SOURCES
@@ -1523,164 +1663,12 @@ index a045752..d2df24b 100644
      # platform is an INTERFACE target on Windows: it contributes the src/
      # include path that "platform/xbox_winnt.h" resolves against.
      target_link_libraries(xbox_kernel PUBLIC platform kernel32 bcrypt)
-+elseif(EMSCRIPTEN)
++elseif(EMSCRIPTEN OR ANDROID)
 +    # kernel_crypto.c is self-contained; nothing calls into OpenSSL.
 +    target_link_libraries(xbox_kernel PUBLIC platform)
  else()
      # Linux: platform layer (POSIX host primitives) + OpenSSL for crypto.
      find_package(OpenSSL REQUIRED)
-diff --git a/src/kernel/guest_ptr.h b/src/kernel/guest_ptr.h
-new file mode 100644
-index 0000000..c24d5b4
---- /dev/null
-+++ b/src/kernel/guest_ptr.h
-@@ -0,0 +1,27 @@
-+/* Guest VA -> host pointer, for host code that reads or writes guest memory
-+ * (device models, bridges, diagnostics).
-+ *
-+ * Natively the guest is laid out 1:1 at a host offset, so this is offset + va
-+ * for every mapped range (RAM, its mirrors, the contiguous window, the
-+ * apertures). The web build has no such layout: a page map with 1 MB
-+ * granularity gives each guest MB its host delta (guest_wasm.c). Pointer
-+ * arithmetic on the result is fine within one mapped range. */
-+#ifndef XBOXRECOMP_GUEST_PTR_H
-+#define XBOXRECOMP_GUEST_PTR_H
-+#include <stddef.h>
-+#include <stdint.h>
-+
-+#if defined(__EMSCRIPTEN__)
-+extern uint32_t g_xbox_pagemap[4096];
-+#define XBOX_HOST(va) ((uint8_t *)(uintptr_t)((uint32_t)(va) + g_xbox_pagemap[(uint32_t)(va) >> 20]))
-+#else
-+ptrdiff_t xbox_GetMemoryOffset(void);
-+#define XBOX_HOST(va) ((uint8_t *)xbox_GetMemoryOffset() + (uint32_t)(va))
-+#endif
-+
-+void *xbox_GuestToHost(uint32_t va);
-+/* The inverse, for diagnostics (a guest object the host holds a pointer to).
-+ * On the web build it knows RAM and the contiguous window; else 0. */
-+uint32_t xbox_HostToGuest(const void *host);
-+
-+#endif
-diff --git a/src/kernel/guest_wasm.c b/src/kernel/guest_wasm.c
-new file mode 100644
-index 0000000..45b6a74
---- /dev/null
-+++ b/src/kernel/guest_wasm.c
-@@ -0,0 +1,113 @@
-+/*
-+ * Guest address space for the WebAssembly build.
-+ *
-+ * Natively the guest's 4 GB are laid out 1:1 at a host offset, with the RAM
-+ * mirrors, the contiguous window and the tiled aperture as extra views of the
-+ * same pages. wasm32 has one linear memory, no fixed placement and no
-+ * aliasing, so every guest access goes through g_xbox_pagemap instead (see
-+ * XBOX_PTR in recomp_types.h): one entry per guest MB holding the host delta,
-+ * host = va + delta (mod 2^32).
-+ *
-+ *   0x00000000  RAM (map size, 64 MB retail), plus mirrors every map size
-+ *               up to 1 + XBOX_NUM_MIRRORS map sizes (same pages)
-+ *   0x80000000  contiguous window (XBOX_CONTIG_SIZE)
-+ *   0xF0000000  tiled aperture: the contiguous window again
-+ *   0xFD000000  NV2A registers, 16 MB of plain memory
-+ *   0xFE800000  MCPX registers, 8 MB (device ranges are serviced by
-+ *               xbox_mmio_read/write before the page map is consulted)
-+ *   0xFF000000  flash, 1 MB
-+ *   elsewhere   one shared scratch MB: reads garbage, never traps
-+ */
-+#if defined(__EMSCRIPTEN__)
-+#include <stdint.h>
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <string.h>
-+
-+#include "kernel.h"
-+#include "xbox_memory_layout.h"
-+
-+#define MB (1u << 20)
-+
-+uint32_t g_xbox_pagemap[4096];
-+
-+static uint8_t *s_ram, *s_contig, *s_nv2a, *s_mcpx, *s_flash, *s_scratch;
-+static size_t s_ram_size;
-+static uint32_t s_contig_base, s_contig_size;
-+
-+static uint8_t *block(size_t bytes)
-+{
-+    void *p = aligned_alloc(MB, bytes);
-+    if (p)
-+        memset(p, 0, bytes);
-+    return (uint8_t *)p;
-+}
-+
-+static void map(uint32_t va, uint32_t bytes, uint8_t *host)
-+{
-+    uint32_t mb;
-+    for (mb = va >> 20; mb < ((va + (bytes - 1)) >> 20) + 1 && mb < 4096; mb++)
-+        g_xbox_pagemap[mb] = (uint32_t)(uintptr_t)host - va;
-+}
-+
-+/* Allocates every block and fills the page map. Returns the RAM block, the
-+ * host address of guest 0. */
-+void *xbox_WasmMapGuest(size_t ram_size, unsigned mirrors,
-+                        uint32_t contig_base, uint32_t contig_size,
-+                        uint32_t tiled_base, uint32_t tiled_size)
-+{
-+    uint32_t mb, m;
-+
-+    if (s_ram)
-+        return s_ram;
-+    s_ram_size = ram_size;
-+    s_contig_base = contig_base;
-+    s_contig_size = contig_size;
-+    s_ram     = block(ram_size);
-+    s_contig  = block(contig_size);
-+    s_nv2a    = block(16 * MB);
-+    s_mcpx    = block(8 * MB);
-+    s_flash   = block(MB);
-+    s_scratch = block(MB);
-+    if (!s_ram || !s_contig || !s_nv2a || !s_mcpx || !s_flash || !s_scratch) {
-+        fprintf(stderr, "xbox_WasmMapGuest: out of memory\n");
-+        return NULL;
-+    }
-+    for (mb = 0; mb < 4096; mb++)
-+        g_xbox_pagemap[mb] = (uint32_t)(uintptr_t)s_scratch - (mb << 20);
-+    for (m = 1; m <= mirrors; m++) {
-+        uint64_t lo = (uint64_t)m * ram_size;
-+        if (lo + ram_size > contig_base)
-+            break;
-+        map((uint32_t)lo, (uint32_t)ram_size, s_ram);
-+    }
-+    map(0, (uint32_t)ram_size, s_ram);
-+    map(contig_base, contig_size, s_contig);
-+    map(tiled_base, tiled_size < contig_size ? tiled_size : contig_size, s_contig);
-+    map(0xFD000000u, 16 * MB, s_nv2a);
-+    map(0xFE800000u, 8 * MB, s_mcpx);
-+    map(0xFF000000u, MB, s_flash);
-+    fprintf(stderr, "  [WASM] guest memory: RAM %u MB at %p (+%u mirrors), contiguous"
-+            " %u MB at %p, NV2A %p, MCPX %p, flash %p\n",
-+            (unsigned)(ram_size / MB), (void *)s_ram, m - 1,
-+            contig_size / MB, (void *)s_contig, (void *)s_nv2a,
-+            (void *)s_mcpx, (void *)s_flash);
-+    return s_ram;
-+}
-+
-+uint32_t xbox_HostToGuest(const void *host)
-+{
-+    const uint8_t *h = (const uint8_t *)host;
-+    if (s_ram && h >= s_ram && h < s_ram + s_ram_size)
-+        return (uint32_t)(h - s_ram);
-+    if (s_contig && h >= s_contig && h < s_contig + s_contig_size)
-+        return s_contig_base + (uint32_t)(h - s_contig);
-+    return 0;
-+}
-+
-+/* Host address of a mapped aperture, by its guest base. */
-+void *xbox_WasmBlock(uint32_t guest_base)
-+{
-+    return (void *)(uintptr_t)(guest_base + g_xbox_pagemap[guest_base >> 20]);
-+}
-+#endif
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
 index c65ba43..79cb9fb 100644
 --- a/src/kernel/kernel_bridge.c
@@ -2976,28 +2964,41 @@ index c65ba43..79cb9fb 100644
          old_protect,
          &old_protect
 diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
-index 42135e0..73cfde7 100644
+index 42135e0..c58870e 100644
 --- a/src/kernel/kernel_file.c
 +++ b/src/kernel/kernel_file.c
-@@ -135,7 +135,7 @@ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
-     return xbox_translate_path(xbox_path, win_path, buf_size);
- }
+@@ -18,6 +18,8 @@
+ #include "kernel.h"
+ #include <string.h>
+ #include <stdio.h>
++#include <stdlib.h>
++#include <ctype.h>
  
--NTSTATUS __stdcall xbox_NtCreateFile(
-+static NTSTATUS __stdcall nt_create_file(
-     PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
-     PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
-     PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess,
-@@ -805,7 +805,7 @@ static NTSTATUS errno_to_status(int e)
+ #if !defined(_WIN32)
+ #include <fcntl.h>
+@@ -805,6 +807,21 @@ static NTSTATUS errno_to_status(int e)
      }
  }
  
--NTSTATUS __stdcall xbox_NtCreateFile(
-+static NTSTATUS __stdcall nt_create_file(
++/* RECOMP_FILE_TRACE=1: every create/write/close with the translated host path,
++ * so a title's save path can be followed from the guest's calls. Off otherwise:
++ * SSX 3 opens thousands of files at boot and the log would drown. */
++static int file_trace(void)
++{
++    static int on = -1;
++    if (on < 0)
++        on = getenv("RECOMP_FILE_TRACE") != NULL;
++    return on;
++}
++
++/* Defined with the directory-scan state further down; a scan's slot is held
++ * until its directory handle closes (see the note there). */
++static void dir_context_release(HANDLE h);
++
+ NTSTATUS __stdcall xbox_NtCreateFile(
      PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
      PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
-     PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess,
-@@ -824,7 +824,12 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -824,7 +841,12 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      }
  
      int fd;
@@ -3011,43 +3012,253 @@ index 42135e0..73cfde7 100644
          if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
              mkdir(host_path, 0755);   /* EEXIST is fine */
          fd = open(host_path, O_RDONLY | O_DIRECTORY);
-@@ -835,6 +840,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -835,6 +857,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      if (fd < 0) {
          int e = errno;
          XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile FAILED: %s (errno=%d)", host_path, e);
 +        fprintf(stderr, "  [FILE] host open '%s' failed: %s\n", host_path, strerror(e));
++        if (file_trace())
++            fprintf(stderr, "  [FILE-T] create '%s' disp=%u access=0x%X -> FAILED %s\n",
++                    host_path, (unsigned)CreateDisposition, (unsigned)DesiredAccess,
++                    strerror(e));
          if (IoStatusBlock) {
              IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
              IoStatusBlock->Information = 0;
-@@ -1340,3 +1346,28 @@ NTSTATUS __stdcall xbox_NtQuerySymbolicLinkObject(
-         *ReturnedLength = (ULONG)strlen(target);
-     return STATUS_SUCCESS;
- }
-+
-+/* A title's file opens, for the game's own logging (save/load journal):
-+ * the Xbox path, whether it was opened for writing, and the result. Set by
-+ * the game; NULL = none. */
-+void (*volatile xbox_file_hook)(const char *xbox_path, int write, NTSTATUS status);
-+
-+NTSTATUS __stdcall xbox_NtCreateFile(
-+    PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
-+    PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
-+    PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess,
-+    ULONG CreateDisposition, ULONG CreateOptions)
-+{
-+    NTSTATUS st = nt_create_file(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock,
-+                                 AllocationSize, FileAttributes, ShareAccess, CreateDisposition,
-+                                 CreateOptions);
-+    void (*hook)(const char *, int, NTSTATUS) = xbox_file_hook;
-+    if (hook && ObjectAttributes && !(CreateOptions & XBOX_FILE_DIRECTORY_FILE)) {
-+        const char *path = get_xbox_path(ObjectAttributes);
-+        /* GENERIC_WRITE, FILE_WRITE_DATA, FILE_APPEND_DATA */
-+        int write = (DesiredAccess & (0x40000000u | 0x2u | 0x4u)) != 0;
-+        if (path)
-+            hook(path, write, st);
+@@ -843,6 +870,14 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+     }
+ 
+     *FileHandle = w32_open_handle(fd, host_path);
++    /* A freshly opened handle can carry the address of one just closed; any
++     * scan state filed under that address belongs to the previous life of the
++     * handle and must not be continued (see dir_context_release). */
++    dir_context_release(*FileHandle);
++    if (file_trace() && (strstr(host_path, "UDATA") || strstr(host_path, "TDATA")))
++        fprintf(stderr, "  [FILE-T] create '%s' disp=%u access=0x%X opts=0x%X -> handle=%p\n",
++                host_path, (unsigned)CreateDisposition, (unsigned)DesiredAccess,
++                (unsigned)CreateOptions, (void *)*FileHandle);
+     if (IoStatusBlock) {
+         IoStatusBlock->Status = STATUS_SUCCESS;
+         IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
+@@ -907,11 +942,26 @@ NTSTATUS __stdcall xbox_NtWriteFile(
+ 
+     ssize_t n = write(fd, Buffer, Length);
+     if (n < 0) {
++        const char *hp = w32_handle_path(FileHandle);
+         XBOX_TRACE(XBOX_LOG_FILE, "NtWriteFile(handle=%p) errno=%d", FileHandle, errno);
++        if (file_trace())
++            fprintf(stderr, "  [FILE-T] write '%s' %u bytes -> FAILED %s\n",
++                    hp ? hp : "?", (unsigned)Length, strerror(errno));
+         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
+         IoStatusBlock->Information = 0;
+         return STATUS_UNSUCCESSFUL;
+     }
++    if (file_trace() && n != (ssize_t)Length) {
++        const char *hp = w32_handle_path(FileHandle);
++        fprintf(stderr, "  [FILE-T] write '%s' %u bytes -> SHORT %zd\n",
++                hp ? hp : "?", (unsigned)Length, n);
 +    }
-+    return st;
++    if (file_trace()) {
++        const char *hp = w32_handle_path(FileHandle);
++        if (hp && (strstr(hp, "UDATA") || strstr(hp, "TDATA")))
++            fprintf(stderr, "  [FILE-T] write '%s' %u bytes -> %zd\n",
++                    hp, (unsigned)Length, n);
++    }
+ 
+     IoStatusBlock->Status = STATUS_SUCCESS;
+     IoStatusBlock->Information = (ULONG_PTR)n;
+@@ -923,6 +973,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
+ {
+     XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
+     if (Handle && Handle != INVALID_HANDLE_VALUE) {
++        dir_context_release(Handle);
+         CloseHandle(Handle);
+         return STATUS_SUCCESS;
+     }
+@@ -953,6 +1004,12 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+     if (fd < 0)
+         return STATUS_INVALID_HANDLE;
+ 
++    if (file_trace()) {
++        const char *hp = w32_handle_path(FileHandle);
++        if (hp && (strstr(hp, "UDATA") || strstr(hp, "TDATA")))
++            fprintf(stderr, "  [FILE-T] query '%s' class=%d\n", hp, (int)FileInformationClass);
++    }
++
+     struct stat st;
+     if (FileInformationClass != XboxFilePositionInformation) {
+         if (fstat(fd, &st) != 0)
+@@ -1023,6 +1080,12 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+     if (fd < 0)
+         return STATUS_INVALID_HANDLE;
+ 
++    if (file_trace()) {
++        const char *hp = w32_handle_path(FileHandle);
++        if (hp && (strstr(hp, "UDATA") || strstr(hp, "TDATA")))
++            fprintf(stderr, "  [FILE-T] setinfo '%s' class=%d\n", hp, (int)FileInformationClass);
++    }
++
+     switch (FileInformationClass) {
+         case XboxFilePositionInformation: {
+             PXBOX_FILE_POSITION_INFORMATION info = (PXBOX_FILE_POSITION_INFORMATION)FileInformation;
+@@ -1079,6 +1142,11 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+             PXBOX_FILE_FS_SIZE_INFORMATION info = (PXBOX_FILE_FS_SIZE_INFORMATION)FsInformation;
+             struct statvfs vfs;
+             int fd = w32_handle_fd(FileHandle);
++            if (file_trace()) {
++                const char *hp = w32_handle_path(FileHandle);
++                if (hp && (strstr(hp, "UDATA") || strstr(hp, "TDATA")))
++                    fprintf(stderr, "  [FILE-T] volume '%s' size-query\n", hp);
++            }
+             /* Xbox geometry, not the host's -- see the note on
+              * XBOX_SECTORS_PER_CLUSTER above. */
+             info->BytesPerSector = XBOX_BYTES_PER_SECTOR;
+@@ -1107,7 +1175,13 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+ NTSTATUS __stdcall xbox_NtFlushBuffersFile(HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock)
+ {
+     int fd = w32_handle_fd(FileHandle);
+-    if (fd >= 0) fsync(fd);
++    int rc = -1;
++    if (fd >= 0) rc = fsync(fd);
++    if (file_trace()) {
++        const char *hp = w32_handle_path(FileHandle);
++        if (hp && (strstr(hp, "UDATA") || strstr(hp, "TDATA")))
++            fprintf(stderr, "  [FILE-T] flush '%s' -> %d\n", hp, rc);
++    }
+     if (IoStatusBlock) {
+         IoStatusBlock->Status = STATUS_SUCCESS;
+         IoStatusBlock->Information = 0;
+@@ -1127,6 +1201,8 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+     const char* xbox_path = get_xbox_path(ObjectAttributes);
+     if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
+         return STATUS_OBJECT_PATH_NOT_FOUND;
++    if (file_trace() && (strstr(host_path, "UDATA") || strstr(host_path, "TDATA")))
++        fprintf(stderr, "  [FILE-T] attrs '%s'\n", host_path);
+     if (stat(host_path, &st) != 0)
+         return STATUS_OBJECT_NAME_NOT_FOUND;
+ 
+@@ -1148,10 +1224,67 @@ typedef struct {
+     char   pattern[64];
+ } DIR_CONTEXT;
+ 
++/* Case-insensitive glob for one path component, with the two '*' and '?'
++ * wildcards a title uses. Windows' FindFirstFile also treats "*.*" as "every
++ * name", including names without a dot, which fnmatch() does not -- and
++ * fnmatch's FNM_CASEFOLD is not portable to every libc this builds against.
++ * SSX 3 lists the save folder it just wrote through this, and a pattern that
++ * does not match is "no saves", which the title reports as a failed save. */
++static int dir_glob_match(const char *pat, const char *name)
++{
++    if (!pat || !*pat || !strcmp(pat, "*") || !strcmp(pat, "*.*"))
++        return 1;
++    while (*pat) {
++        if (*pat == '*') {
++            while (*pat == '*') pat++;
++            if (!*pat) return 1;
++            for (const char *t = name; ; t++) {
++                if (dir_glob_match(pat, t)) return 1;
++                if (!*t) return 0;
++            }
++        } else if (*pat == '?') {
++            if (!*name) return 0;
++            pat++; name++;
++        } else {
++            if (tolower((unsigned char)*pat) != tolower((unsigned char)*name))
++                return 0;
++            pat++; name++;
++        }
++    }
++    return *name == '\0';
 +}
++
+ static DIR_CONTEXT s_dir_contexts[MAX_DIR_CONTEXTS];
+ static CRITICAL_SECTION s_dir_cs;
+ static BOOL s_dir_cs_init = FALSE;
+ 
++/* A scan slot lives as long as the directory handle it belongs to. The first
++ * version freed a slot only when a scan ran off the end of the directory, and
++ * a title that stops as soon as it has the entry it wanted (SSX 3 stops after
++ * reading the two files it looks for) never ran off the end: every scan leaked
++ * a slot, and after 64 of them every later NtQueryDirectoryFile failed with
++ * STATUS_INSUFFICIENT_RESOURCES. The title sees "no saves" in the middle of
++ * saving, treats the save as failed and reports it -- with no file error
++ * anywhere, because no file call failed. Freeing on close also keeps a
++ * recycled handle from matching a stale scan. */
++static void dir_context_release(HANDLE h)
++{
++    if (!s_dir_cs_init || !h)
++        return;
++    EnterCriticalSection(&s_dir_cs);
++    for (int i = 0; i < MAX_DIR_CONTEXTS; i++) {
++        if (s_dir_contexts[i].handle == h) {
++            if (s_dir_contexts[i].dir)
++                closedir(s_dir_contexts[i].dir);
++            s_dir_contexts[i].dir = NULL;
++            s_dir_contexts[i].handle = NULL;
++            s_dir_contexts[i].pattern[0] = '\0';
++            break;
++        }
++    }
++    LeaveCriticalSection(&s_dir_cs);
++}
++
+ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
+     PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation, ULONG Length,
+@@ -1170,6 +1303,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+     if (!s_dir_cs_init) { InitializeCriticalSection(&s_dir_cs); s_dir_cs_init = TRUE; }
+     EnterCriticalSection(&s_dir_cs);
+ 
++    if (file_trace()) {
++        const char *dp0 = w32_handle_path(FileHandle);
++        if (dp0 && (strstr(dp0, "UDATA") || strstr(dp0, "TDATA")))
++            fprintf(stderr, "  [FILE-T] list-entry '%s' restart=%d name=%.*s\n", dp0,
++                    (int)RestartScan,
++                    (FileName && FileName->Buffer) ? (int)FileName->Length : 0,
++                    (FileName && FileName->Buffer) ? FileName->Buffer : "");
++    }
++
+     /* Locate or create the per-handle enumeration context. */
+     DIR_CONTEXT* ctx = NULL;
+     for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
+@@ -1177,12 +1319,19 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+     if (!ctx) {
+         for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
+             if (s_dir_contexts[i].handle == NULL) { ctx = &s_dir_contexts[i]; break; }
+-        if (!ctx) { LeaveCriticalSection(&s_dir_cs); return STATUS_INSUFFICIENT_RESOURCES; }
++        if (!ctx) {
++            LeaveCriticalSection(&s_dir_cs);
++            fprintf(stderr, "  [FILE] NtQueryDirectoryFile: no scan slot free (all %d in use)\n",
++                    MAX_DIR_CONTEXTS);
++            fflush(stderr);
++            return STATUS_INSUFFICIENT_RESOURCES;
++        }
+         ctx->handle = FileHandle;
+         ctx->dir = NULL;
+     }
+ 
+-    if (RestartScan || ctx->dir == NULL) {
++    if (RestartScan || ctx->dir == NULL ||
++        (FileName && FileName->Buffer && FileName->Length > 0)) {
+         if (ctx->dir) { closedir(ctx->dir); ctx->dir = NULL; }
+         const char* dpath = w32_handle_path(FileHandle);
+         if (!dpath) { LeaveCriticalSection(&s_dir_cs); return STATUS_UNSUCCESSFUL; }
+@@ -1218,8 +1367,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+         }
+         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+             continue;
+-        if (fnmatch(ctx->pattern, de->d_name, FNM_CASEFOLD) == 0)
++        if (dir_glob_match(ctx->pattern, de->d_name)) {
++            if (file_trace()) {
++                const char *dp = w32_handle_path(FileHandle);
++                if (dp && (strstr(dp, "UDATA") || strstr(dp, "TDATA")))
++                    fprintf(stderr, "  [FILE-T] list '%s' pat='%s' -> '%s'\n",
++                            dp, ctx->pattern, de->d_name);
++            }
+             break;
++        }
+     }
+ 
+     char full[MAX_PATH];
 diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
 index 1ad4fff..7ba275f 100644
 --- a/src/kernel/kernel_hal.c
@@ -3155,7 +3366,7 @@ index 1ad4fff..7ba275f 100644
  }
  
 diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
-index caf6390..627dbdf 100644
+index caf6390..5752bbe 100644
 --- a/src/kernel/kernel_path.c
 +++ b/src/kernel/kernel_path.c
 @@ -156,6 +156,19 @@ static int resolve_symlink(const char* xbox_path, char* out, size_t out_size)
@@ -3240,7 +3451,7 @@ index caf6390..627dbdf 100644
  void xbox_path_init(const char* game_dir, const char* save_dir)
  {
      if (game_dir) {
-@@ -548,11 +584,187 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
+@@ -548,11 +584,191 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
      strip_trailing_slash(s_game_dir);
      strip_trailing_slash(s_save_dir);
  
@@ -3261,8 +3472,12 @@ index caf6390..627dbdf 100644
 +        const char *env = getenv("RECOMP_SAVE_DIR");
 +        s_title_save_dir[0] = '\0';
 +        if (env && *env) {
-+            if (!realpath(env, s_title_save_dir))
-+                snprintf(s_title_save_dir, sizeof(s_title_save_dir), "%s", env);
++            /* realpath's output buffer must hold PATH_MAX bytes (4096 on
++             * Android/Bionic); the save-dir array is only MAX_PATH. */
++            char resolved[4096];
++            if (!realpath(env, resolved))
++                snprintf(resolved, sizeof resolved, "%s", env);
++            snprintf(s_title_save_dir, sizeof(s_title_save_dir), "%s", resolved);
 +            mkdir_p(s_title_save_dir);
 +            strip_trailing_slash(s_title_save_dir);
 +            fprintf(stderr, "[PATH] title saves (UDATA/TDATA) -> %s\n", s_title_save_dir);
@@ -3428,7 +3643,7 @@ index caf6390..627dbdf 100644
  BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
  {
      const char* remainder = NULL;
-@@ -566,6 +778,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
+@@ -566,6 +782,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
      if (!s_initialized)
          xbox_path_init(NULL, NULL);
  
@@ -3438,7 +3653,7 @@ index caf6390..627dbdf 100644
      {
          char linked[512];
          if (resolve_symlink(xbox_path, linked, sizeof(linked)))
-@@ -577,6 +792,8 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
+@@ -577,6 +796,8 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
          if (skip) {
              remainder = xbox_path + skip;
              base_dir  = s_rules[i].to_save ? s_save_dir : s_game_dir;
@@ -3447,7 +3662,7 @@ index caf6390..627dbdf 100644
              sub_dir   = s_rules[i].sub_posix;
              goto translate;
          }
-@@ -616,6 +833,7 @@ translate:
+@@ -616,6 +837,7 @@ translate:
                  host_path_buf[--n] = '\0';
          }
  
@@ -3705,111 +3920,6 @@ index 4ebdfb9..6508945 100644
      default:
          xbox_log(XBOX_LOG_WARN, XBOX_LOG_XBOX,
              "ExQueryNonVolatileSetting: unhandled index 0x%02X", ValueIndex);
-diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
-new file mode 100644
-index 0000000..2102f59
---- /dev/null
-+++ b/src/kernel/nv2a_backend.h
-@@ -0,0 +1,99 @@
-+/**
-+ * Pluggable GPU backend for the pushbuffer executor.
-+ *
-+ * The executor parses the pushbuffer, tracks state and runs vertex programs.
-+ * With a backend registered it hands the rasterising to it instead of
-+ * drawing pixels itself. The backend is optional: with none set, nothing
-+ * here is used.
-+ */
-+#ifndef XBOXRECOMP_NV2A_BACKEND_H
-+#define XBOXRECOMP_NV2A_BACKEND_H
-+
-+#include <stdint.h>
-+#include <stdio.h>
-+#include "nv2a_vsh_interp.h"
-+#include "nv2a_combiner.h"
-+
-+typedef struct {
-+    uint32_t color_offset;          /* guest address of the colour surface */
-+    uint32_t pitch;
-+    uint32_t x, y, width, height;   /* clip rectangle */
-+    uint32_t bpp;                   /* 2 or 4 */
-+    int      swizzled;              /* render target stored Morton-swizzled */
-+    uint32_t zeta_offset;
-+    uint32_t zmax;                  /* 0xFFFF (Z16) or 0xFFFFFF (Z24S8) */
-+    int      depth_test, depth_write;
-+    uint32_t depth_func;            /* GL enum, as the NV2A takes it */
-+    int      w_buffer;              /* CONTROL0 Z_PERSPECTIVE: depth is w, not z */
-+    /* Stencil (Z24S8 only): STENCIL_TEST_ENABLE and 0x0360..0x0378 -- write
-+     * mask, func (GL enum), ref, read mask, op fail / zfail / zpass (GL
-+     * enums: KEEP 0x1E00, ZERO 0, REPLACE 0x1E01, INCRSAT 0x1E02, DECRSAT
-+     * 0x1E03, INVERT 0x150A, INCR 0x8507, DECR 0x8508); stencil_clear is
-+     * the ZSTENCIL_CLEAR_VALUE's stencil byte. */
-+    int      stencil_test;
-+    uint32_t stencil_write_mask, stencil_func, stencil_ref, stencil_read_mask;
-+    uint32_t stencil_fail, stencil_zfail, stencil_zpass, stencil_clear;
-+    /* Per-pixel state (GL enums as the NV2A takes them). */
-+    int      blend_enable;
-+    uint32_t blend_sfactor, blend_dfactor, blend_equation, blend_color; /* ARGB */
-+    uint32_t color_mask;            /* A<<24 R<<16 G<<8 B, non-zero byte = write */
-+    int      alpha_test;
-+    uint32_t alpha_func, alpha_ref;
-+    Nv2aCombiner rc;
-+    int      rc_seen;               /* combiners programmed by the title */
-+    uint32_t fog_enable, fog_mode, fog_color;   /* fog_color: FOG_COLOR as written (R in bits 0-7) */
-+    float    fog_param[2];
-+    /* Points: size in pixels (SET_POINT_SIZE / 8, 1 if unset), used unless
-+     * point_params (then the program's oPts.x); point_sprite = stage 3
-+     * coordinates come from the position inside the point. */
-+    float    point_size;
-+    int      point_params, point_sprite;
-+} Nv2aTarget;
-+
-+typedef struct {
-+    int      valid;
-+    uint32_t offset, width, height;
-+    uint32_t addr_u, addr_v;        /* 1 wrap 2 mirror 3 clamp 4 border 5 clamp-to-edge */
-+    int      linear_filter;         /* magnification */
-+    int      normalised;            /* swizzled/DXT: coords normalised; else texels */
-+    uint32_t format;                /* NV097 colour format code */
-+    uint32_t stage_program;         /* SET_SHADER_STAGE_PROGRAM, 5 bits per stage */
-+    uint64_t hash;                  /* of the base level's bytes (this frame) */
-+    int      cube;                  /* cube map: decoded as six faces stacked, +X -X +Y -Y +Z -Z */
-+} Nv2aTexInfo;
-+
-+/* Texture stage description, and mip 0 decoded to A8R8G8B8 (width*height
-+ * dwords; a cube map width*height*6, the faces one below the other). Both
-+ * return 0 if the stage is unusable. */
-+int nv2a_exec_tex_info(int stage, Nv2aTexInfo *info);
-+int nv2a_exec_tex_decode(int stage, uint32_t *out);
-+
-+/* Trace aid: the current batch's program, constants and vertex inputs. */
-+void nv2a_exec_dump_batch(FILE *f, uint32_t max_vertices);
-+
-+#define NV2A_CLEAR_Z      0x01
-+#define NV2A_CLEAR_STENCIL 0x02
-+#define NV2A_CLEAR_COLOR  0xF0
-+
-+typedef struct {
-+    /* One draw call after the vertex program: n vertices, assembled
-+     * according to prim (NV097 primitive code). Return 1 if consumed. */
-+    int  (*draw)(const Nv2aTarget *t, uint32_t prim, const Nv2aVshOutput *v, uint32_t n);
-+    /* CLEAR_SURFACE; argb and depth are already decoded (depth 0..1). */
-+    /* Return 1 if consumed (else the executor clears guest memory itself). */
-+    int  (*clear)(const Nv2aTarget *t, uint32_t flags, uint32_t argb, float depth);
-+    /* A finished frame is being presented from t: the backend must have
-+     * written it into guest memory (A8R8G8B8 / R5G6B5 at color_offset). */
-+    void (*flip)(const Nv2aTarget *t);
-+    /* Optional: the same draw with the vertex program left to the backend
-+     * (run on the GPU). in: n vertices of p->nin float4 inputs each (packed
-+     * by p->in_slot), in draw order. Return 1 if consumed; 0 and the
-+     * executor runs the program itself and calls draw. Not offered when the
-+     * program writes constants (vertex order matters then). */
-+    int  (*draw_vsh)(const Nv2aTarget *t, uint32_t prim, const float *in, uint32_t n,
-+                     const Nv2aVshProgram *p);
-+} Nv2aBackend;
-+
-+void nv2a_exec_set_backend(const Nv2aBackend *b);
-+
-+#endif
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
 index c65632c..35cb429 100644
 --- a/src/kernel/nv2a_pb_exec.c
@@ -6502,7 +6612,7 @@ index 0b2d723..f612ac4 100644
      fflush(stderr);
  }
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 72d5131..2ae386e 100644
+index 72d5131..bd971b1 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -191,11 +191,11 @@ static const struct { uint32_t offset; uint32_t busy_mask; } NV2A_ACK[] = {
@@ -7124,7 +7234,7 @@ index 72d5131..2ae386e 100644
      g_mapping_handle = CreateFileMappingA(
          INVALID_HANDLE_VALUE,   /* page file backed */
          NULL,                   /* default security */
-@@ -1790,7 +2082,14 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1790,7 +2082,35 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           * this on Windows needs placeholder reservations (VirtualAlloc2). */
  #ifndef _WIN32
          g_span_size = g_memory_size * (size_t)(1 + XBOX_NUM_MIRRORS);
@@ -7132,15 +7242,36 @@ index 72d5131..2ae386e 100644
 +        /* The device apertures sit at base + 0xFD000000 and up, so base + 4 GB
 +         * must stay inside the host address space. An OS-chosen reservation is
 +         * placed at the top of it (0xFFFF........ on arm64 Linux) and every
-+         * aperture then fails; ask for a low-ish address first. */
-+        g_span_base = VirtualAlloc((LPVOID)(uintptr_t)0x100000000000ULL,
-+                                   g_span_size, MEM_RESERVE, PAGE_NOACCESS);
-+        if (!g_span_base)
-+            g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
++         * aperture then fails; ask for a low-ish address first.
++         *
++         * Android apps have a 39-bit user VA (512 GB) and the OS hands out
++         * mmap(NULL) addresses just below that ceiling, so a base picked that
++         * way leaves no room for base + 4 GB: the contiguous window, the NV2A,
++         * MCPX, flash and tiled apertures all fail and the first guest touch
++         * of 0x80010000 faults. Ask for a low address there instead. */
++        {
++            static const uintptr_t span_try[] = {
++#if defined(__ANDROID__)
++                0x1000000000ULL,        /* 64 GB */
++                0x0400000000ULL,        /* 16 GB */
++                0x0200000000ULL,        /* 8 GB */
++#endif
++                0x100000000000ULL,      /* 16 TB: x86_64 Linux, arm64 macOS */
++                0,                      /* let the OS choose */
++            };
++            size_t si;
++
++            for (si = 0; si < sizeof(span_try) / sizeof(span_try[0]); si++) {
++                g_span_base = VirtualAlloc((LPVOID)span_try[si], g_span_size,
++                                           MEM_RESERVE, PAGE_NOACCESS);
++                if (g_span_base)
++                    break;
++            }
++        }
          if (g_span_base) {
              VirtualFree(g_span_base, g_memory_size, MEM_RELEASE);
              g_memory_base = MapViewOfFileEx(g_mapping_handle,
-@@ -1826,6 +2125,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1826,6 +2146,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          }
      }
  
@@ -7148,7 +7279,7 @@ index 72d5131..2ae386e 100644
      if (!g_memory_base) {
          fprintf(stderr, "xbox_MemoryLayoutInit: failed to map base view (%zu KB)\n",
                  g_memory_size / 1024);
-@@ -1908,7 +2208,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1908,7 +2229,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * Helper macro: convert Xbox VA to actual mapped address.
       * When g_memory_offset == 0 (ideal case), this is identity.
       */
@@ -7157,7 +7288,7 @@ index 72d5131..2ae386e 100644
  
      /*
       * Copy XBE header to base address.
-@@ -2088,7 +2388,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2088,7 +2409,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
               * slots, and kernel.h notes 366 is short by 12. A title importing
               * a high ordinal would have had its table truncated here. */
              for (uint32_t t = 0; t < XBOX_KERNEL_THUNK_TABLE_SIZE; t++) {
@@ -7166,7 +7297,7 @@ index 72d5131..2ae386e 100644
                  if (entry == 0) break;
                  thunk_count++;
              }
-@@ -2143,7 +2443,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2143,7 +2464,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * We use free space in the BSS area for the fake structures.
       */
      {
@@ -7175,7 +7306,7 @@ index 72d5131..2ae386e 100644
          #define MEM32_INIT(va, val) (*(uint32_t *)XBOX_VA(va) = (uint32_t)(val))
  
          /* Fake TIB at address 0x0 */
-@@ -2274,6 +2574,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2274,6 +2595,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t contig_native = XBOX_CONTIG_BASE + g_memory_offset;
@@ -7186,7 +7317,7 @@ index 72d5131..2ae386e 100644
          g_contig_mapping = CreateFileMappingW(
              INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
              0, (DWORD)XBOX_CONTIG_SIZE, NULL);
-@@ -2288,6 +2592,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2288,6 +2613,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                  MEM_RESERVE | MEM_COMMIT,
                  PAGE_READWRITE
              );
@@ -7194,7 +7325,7 @@ index 72d5131..2ae386e 100644
          if (g_contig_memory) {
              fprintf(stderr, "  Contiguous window: %u MB at Xbox VA 0x%08X\n",
                      XBOX_CONTIG_SIZE / (1024 * 1024), XBOX_CONTIG_BASE);
-@@ -2319,12 +2624,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2319,12 +2645,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t nv2a_native = XBOX_NV2A_BASE + g_memory_offset;
@@ -7212,7 +7343,7 @@ index 72d5131..2ae386e 100644
          /* The pushbuffer survey rides on the same poll, so either
           * variable arms it. */
          s_nv2a_trace = getenv("RECOMP_NV2A_TRACE") != NULL
-@@ -2364,12 +2674,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2364,12 +2695,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t mcpx_native = XBOX_MCPX_BASE + g_memory_offset;
@@ -7230,7 +7361,7 @@ index 72d5131..2ae386e 100644
          g_mcpx_regs = g_mcpx_memory;
          if (g_mcpx_memory) {
              /* AC'97 codec ready.
-@@ -2425,9 +2740,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2425,9 +2761,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                   * memory keeps what the title writes. */
                  enum { APU_TRAP_BYTES = 0x00030000 };
                  DWORD old_protect;
@@ -7244,7 +7375,7 @@ index 72d5131..2ae386e 100644
                  if (g_apu_mmio_trapped)
                      fprintf(stderr, "  APU: 0x%08X..0x%08X trapped for MMIO"
                                      " (GP/EP DSP memory left as RAM)\n",
-@@ -2437,7 +2756,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2437,7 +2777,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                      |= MCPX_AC97_CODEC_READY;
                  /* Before the trap is armed: this write would otherwise be
                   * the first thing to fault. */
@@ -7255,7 +7386,7 @@ index 72d5131..2ae386e 100644
                  fprintf(stderr, "  AC97: codec reported ready at 0x%08X"
                                  " (DirectSound will initialise)\n",
                          XBOX_MCPX_BASE + MCPX_AC97_CODEC_STATUS);
-@@ -2456,12 +2777,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2456,12 +2798,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      {
          uintptr_t flash_native = XBOX_FLASH_BASE + g_memory_offset;
  
@@ -7273,7 +7404,7 @@ index 72d5131..2ae386e 100644
          if (g_flash_memory) {
              fprintf(stderr, "  Flash ROM aperture: %u MB at Xbox VA "
                      "0x%08X (zeroed, not a real BIOS image)\n",
-@@ -2494,7 +2820,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2494,7 +2841,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          /* Already committed if the contiguous window above succeeded -
           * 0x80010000 sits inside it - so just use that storage. */
          g_kernel_memory = g_contig_memory
@@ -7282,7 +7413,7 @@ index 72d5131..2ae386e 100644
              : VirtualAlloc((LPVOID)kernel_native, KERNEL_PAGE_SIZE,
                             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
          if (g_kernel_memory) {
-@@ -2532,6 +2858,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2532,6 +2879,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * intervals. All views alias the same physical pages, so reads and
       * writes at any mirror address correctly access the base data.
       */
@@ -7290,7 +7421,7 @@ index 72d5131..2ae386e 100644
      {
          int mirrors_ok = 0;
          /* The tiled aperture is a specific architectural alias -- physical RAM
-@@ -2644,11 +2971,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2644,11 +2992,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
               * startup line. */
              {
                  volatile uint32_t *via_tiled =
@@ -7304,7 +7435,7 @@ index 72d5131..2ae386e 100644
                  uint32_t saved = *via_contig;
  
                  *via_tiled = 0xA5C30F17u;
-@@ -2674,6 +2999,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2674,6 +3020,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          }
      }
  
@@ -7312,7 +7443,7 @@ index 72d5131..2ae386e 100644
      xbox_WatchInit();
      fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
      return TRUE;
-@@ -2834,6 +3160,26 @@ ptrdiff_t xbox_GetMemoryOffset(void)
+@@ -2834,6 +3181,26 @@ ptrdiff_t xbox_GetMemoryOffset(void)
      return g_memory_offset;
  }
  
@@ -7339,7 +7470,7 @@ index 72d5131..2ae386e 100644
  /* ── Dynamic heap allocator ────────────────────────────────
   *
   * Simple bump allocator for MmAllocateContiguousMemory and similar.
-@@ -2916,7 +3262,7 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
+@@ -2916,7 +3283,7 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
          g_heap_blocks[i].free = 0;
          if (back && !heap_insert_free(i + 1, start + size, back))
              g_heap_blocks[i].size += back;   /* table full: keep it attached */
@@ -7348,7 +7479,7 @@ index 72d5131..2ae386e 100644
          return start;
      }
      return 0;
-@@ -2957,7 +3303,7 @@ static int g_thread_stacks_used = 0;
+@@ -2957,7 +3324,7 @@ static int g_thread_stacks_used = 0;
  uint32_t xbox_AllocThreadTib(void)
  {
      /* XBOX_VA is scoped to the loader; the same arithmetic, spelled here. */
@@ -7357,7 +7488,7 @@ index 72d5131..2ae386e 100644
      const uint32_t tib_size = 0x40;
      uint32_t tib, block, thread_data, total;
  
-@@ -3153,7 +3499,7 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
+@@ -3153,7 +3520,7 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
      if (reclaim)
          ReleaseSRWLockExclusive(&g_contig_lock);
  
@@ -7366,7 +7497,7 @@ index 72d5131..2ae386e 100644
      return result;
  }
  
-@@ -3267,7 +3613,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+@@ -3267,7 +3634,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
              }
              g_heap_blocks[i].free = 0;
              result = g_heap_blocks[i].addr;
@@ -7375,7 +7506,7 @@ index 72d5131..2ae386e 100644
              return result;
          }
      }
-@@ -3313,7 +3659,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+@@ -3313,7 +3680,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
      g_heap_next = result + size;
  
      /* Zero-fill the allocated block (Xbox memory is always zeroed) */
@@ -7406,7 +7537,7 @@ index 53f9d3d..f826168 100644
 +
  #endif /* XBOX_MEMORY_LAYOUT_H */
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
-index 93288d5..77c6520 100644
+index 93288d5..1d1c9e4 100644
 --- a/src/platform/win32_compat.c
 +++ b/src/platform/win32_compat.c
 @@ -35,8 +35,10 @@
@@ -7420,7 +7551,22 @@ index 93288d5..77c6520 100644
  
  /* ===================================================================== */
  /* Last-error (thread-local)                                             */
-@@ -1271,7 +1273,23 @@ VOID OutputDebugStringA(LPCSTR str)
+@@ -801,7 +803,14 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
+ {
+     w32_object *o = (w32_object *)h;
+     if (!o || o->kind != K_THREAD) return FALSE;
++#if defined(__ANDROID__)
++    /* Bionic has no pthread_cancel, and there is no async thread teardown on
++     * Android at all. Mark the thread exited (its waiters see the exit code)
++     * and let it run out; the guest's own TerminateThread calls are rare. */
++    (void)exitCode;
++#else
+     pthread_cancel(o->thread);
++#endif
+     pthread_mutex_lock(&o->lock);
+     o->exit_code = exitCode;
+     o->exited    = 1;
+@@ -1271,7 +1280,23 @@ VOID OutputDebugStringA(LPCSTR str)
      if (str) fputs(str, stderr);
  }
  
@@ -7444,7 +7590,19 @@ index 93288d5..77c6520 100644
  
  BOOL IsDebuggerPresent(void)
  {
-@@ -1456,7 +1474,11 @@ DWORD XInputGetState(DWORD idx, XINPUT_STATE *state)
+@@ -1311,6 +1336,11 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
+ {
+ #if defined(__APPLE__)
+     memset_s(ptr, cnt, 0, cnt);
++#elif defined(__ANDROID__)
++    /* Bionic's explicit_bzero arrives after our API level; the barrier after
++     * the memset keeps the compiler from dropping the stores. */
++    memset(ptr, 0, cnt);
++    __asm__ __volatile__("" : : "r"(ptr) : "memory");
+ #else
+     explicit_bzero(ptr, cnt);
+ #endif
+@@ -1456,7 +1486,11 @@ DWORD XInputGetState(DWORD idx, XINPUT_STATE *state)
  BOOL TerminateProcess(HANDLE process, UINT exitCode)
  {
      (void)process;
@@ -7456,7 +7614,7 @@ index 93288d5..77c6520 100644
  }
  
  VOID OutputDebugStringW(LPCWSTR str)
-@@ -1781,6 +1803,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+@@ -1781,6 +1815,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
      b->ullAvailPhys     = avail;
      b->ullTotalPageFile = b->ullTotalPhys + (ULONGLONG)swap.xsu_total;
      b->ullAvailPageFile = b->ullAvailPhys + (ULONGLONG)swap.xsu_avail;
@@ -7815,10 +7973,10 @@ index 18291d7..e0e9f01 100644
   * XInput pad n and by pad-script steps prefixed "p<n+1>-". */
  #define USB_GAMEPAD_MAX 4
 diff --git a/src/video/CMakeLists.txt b/src/video/CMakeLists.txt
-index 2189a3b..4b8e73a 100644
+index 2189a3b..9aa9acf 100644
 --- a/src/video/CMakeLists.txt
 +++ b/src/video/CMakeLists.txt
-@@ -3,12 +3,19 @@ add_library(xbox_video STATIC
+@@ -3,12 +3,28 @@ add_library(xbox_video STATIC
      video_player.c
      video_pump.c
      fb_present.c
@@ -7835,94 +7993,21 @@ index 2189a3b..4b8e73a 100644
      ${CMAKE_CURRENT_SOURCE_DIR}/..
  )
  target_link_libraries(xbox_video PUBLIC xbox_d3d8)
++if(ANDROID)
++    # Android has no D3D8/GL layer (src/d3d), so the SDL dependency of the
++    # framebuffer presenter is declared here. fb_present_sdl.c spells the
++    # header <SDL2/SDL.h>: with a prefixed SDL2 only its own SDL2/ dir is on
++    # the include path, so add the parent as well.
++    find_package(SDL2 REQUIRED)
++    target_link_libraries(xbox_video PUBLIC SDL2::SDL2)
++    target_include_directories(xbox_video PRIVATE "${SDL2_INCLUDE_DIRS}/..")
++endif()
  if(WIN32)
 -    target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32)
 +    target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32 d3d11 dxgi)
  endif()
-diff --git a/src/video/fb_gamma.c b/src/video/fb_gamma.c
-new file mode 100644
-index 0000000..165eab0
---- /dev/null
-+++ b/src/video/fb_gamma.c
-@@ -0,0 +1,76 @@
-+/* The display's gamma ramp.
-+ *
-+ * Xbox D3D (SetGammaRamp; SSX 3's sub_00239B76) loads 256 R, G and B entries
-+ * into the NV2A's VGA palette (PRMDIO 0x6813C8 index, 0x6813C9 data, three
-+ * writes per entry), and the RAMDAC looks every scanned-out pixel up in it.
-+ * The emulated MMIO keeps no such table, so a title calls
-+ * xbox_FramebufferSetGammaRamp with the ramp it uploads and the presenters
-+ * apply it to the finished frame -- without it the picture is shown with a
-+ * linear ramp, lighter and flatter than on the console.
-+ * RECOMP_GAMMA=0 ignores the title's ramp. */
-+#include <stdint.h>
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <string.h>
-+
-+static uint8_t s_lut[3][256];
-+static volatile int s_lut_on;
-+static volatile unsigned s_lut_serial;     /* +1 per change, for the GPU presenter */
-+
-+void xbox_FramebufferSetGammaRamp(const uint8_t *r, const uint8_t *g, const uint8_t *b)
-+{
-+    static int allowed = -1, said;
-+    int i, identity = 1;
-+    if (allowed < 0) {
-+        const char *e = getenv("RECOMP_GAMMA");
-+        allowed = !(e && *e == '0');
-+    }
-+    for (i = 0; i < 256; i++)
-+        if (r[i] != i || g[i] != i || b[i] != i)
-+            identity = 0;
-+    if (!allowed || identity) {
-+        s_lut_on = 0;
-+        s_lut_serial++;
-+        return;
-+    }
-+    memcpy(s_lut[0], r, 256);
-+    memcpy(s_lut[1], g, 256);
-+    memcpy(s_lut[2], b, 256);
-+    s_lut_on = 1;
-+    s_lut_serial++;
-+    if (said < 4) {
-+        said++;
-+        fprintf(stderr, "[GAMMA] ramp loaded: r 0->%u 64->%u 128->%u 192->%u 255->%u"
-+                " (g 128->%u, b 128->%u)\n", r[0], r[64], r[128], r[192], r[255], g[128], b[128]);
-+    }
-+}
-+
-+/* Apply the ramp to n X8R8G8B8 pixels in place (no-op without one). */
-+void xbox_FramebufferApplyGamma(uint32_t *px, size_t n)
-+{
-+    size_t i;
-+    if (!s_lut_on)
-+        return;
-+    for (i = 0; i < n; i++) {
-+        uint32_t c = px[i];
-+        px[i] = (c & 0xFF000000u) | ((uint32_t)s_lut[0][(c >> 16) & 0xFF] << 16)
-+              | ((uint32_t)s_lut[1][(c >> 8) & 0xFF] << 8) | s_lut[2][c & 0xFF];
-+    }
-+}
-+
-+/* The ramp as 256 B8G8R8A8 texels (identity without one), for a presenter
-+ * that applies it on the GPU; returns its change serial. */
-+unsigned xbox_FramebufferGammaTexels(uint32_t *out256)
-+{
-+    int i;
-+    for (i = 0; i < 256; i++)
-+        out256[i] = s_lut_on ? 0xFF000000u | (uint32_t)s_lut[0][i] << 16
-+                               | (uint32_t)s_lut[1][i] << 8 | s_lut[2][i]
-+                             : 0xFF000000u | (uint32_t)i * 0x010101u;
-+    return s_lut_serial;
-+}
-+
-+unsigned xbox_FramebufferGammaSerial(void)
-+{
-+    return s_lut_serial;
-+}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 08bae4b..f12235a 100644
+index 08bae4b..6c1bcb6 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -15,12 +15,15 @@
@@ -8125,7 +8210,7 @@ index 08bae4b..f12235a 100644
  }
  
  int xbox_FramebufferKeyDown(int vk)
-@@ -140,18 +295,195 @@ int xbox_FramebufferKeyDown(int vk)
+@@ -140,18 +295,194 @@ int xbox_FramebufferKeyDown(int vk)
      return s_key_down[vk] != 0;
  }
  
@@ -8162,7 +8247,6 @@ index 08bae4b..f12235a 100644
 +                     saved.bottom - saved.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
 +        full = 0;
 +    }
-+    fprintf(stderr, "[FBWIN] fullscreen %s\n", full ? "on" : "off");
 +}
 +
 +/* FPS overlay (F3, or RECOMP_FPS_OVERLAY=1 to start with it on): drawn
@@ -8322,20 +8406,7 @@ index 08bae4b..f12235a 100644
          /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
           *
           * The obvious diagnostic -- sampling which keys are held, once a
-@@ -179,7 +511,12 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
-     /* Alt-tabbing away with a key held would leave it held for ever. */
-     case WM_KILLFOCUS:
-         memset((void *)s_key_down, 0, sizeof s_key_down);
-+        fprintf(stderr, "[FBWIN] focus lost\n");
-         return 0;
-+
-+    case WM_SETFOCUS:
-+        fprintf(stderr, "[FBWIN] focus gained\n");
-+        break;
-     }
-     return DefWindowProcA(h, m, w, l);
- }
-@@ -217,32 +554,55 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+@@ -217,32 +548,55 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
   * A black window is ambiguous: it means either that the read path is wrong or
   * that the title really did render black. Dumping the same converted pixels
   * the window draws settles which, and does it without a screenshot. */
@@ -8399,7 +8470,7 @@ index 08bae4b..f12235a 100644
              line[x * 3 + 0] = (uint8_t)(src[x] & 0xFF);
              line[x * 3 + 1] = (uint8_t)((src[x] >> 8) & 0xFF);
              line[x * 3 + 2] = (uint8_t)((src[x] >> 16) & 0xFF);
-@@ -250,12 +610,157 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -250,12 +604,146 @@ int xbox_FramebufferDumpBmp(const char *path)
          fwrite(line, 1, row, f);
      }
      free(line);
@@ -8519,17 +8590,6 @@ index 08bae4b..f12235a 100644
 +    }
 +}
 +
-+void xbox_FramebufferSnapshot(const char *path)
-+{
-+    if (gpu_present_active()) {
-+        gpu_present_capture(path);
-+        return;
-+    }
-+    s_dump_quiet = 1;
-+    xbox_FramebufferDumpBmp(path);
-+    s_dump_quiet = 0;
-+}
-+
 +/* GDI fallback: the frame letterboxed into the client area, like the D3D11
 + * presenter; the borders are cleared when the size changes. */
 +static void gdi_blit(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
@@ -8559,7 +8619,7 @@ index 08bae4b..f12235a 100644
  static DWORD WINAPI fb_thread(LPVOID unused)
  {
      HWND hwnd;
-@@ -274,18 +779,56 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -274,18 +762,56 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
@@ -8623,7 +8683,7 @@ index 08bae4b..f12235a 100644
  
      memset(&bi, 0, sizeof(bi));
      bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
-@@ -299,6 +842,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -299,6 +825,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
  
      fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
              s_fb_width, s_fb_height);
@@ -8634,7 +8694,7 @@ index 08bae4b..f12235a 100644
  
      while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
          MSG msg;
-@@ -306,7 +853,42 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -306,7 +836,42 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              TranslateMessage(&msg);
              DispatchMessageA(&msg);
          }
@@ -8678,7 +8738,7 @@ index 08bae4b..f12235a 100644
              /* A finished frame, published by the flip. Copied into s_rgb so
               * the dump path and GDI see one consistent image even if the
               * next flip lands mid-blit. */
-@@ -314,19 +896,28 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -314,19 +879,28 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              if (s_present[idx])
                  memcpy(s_rgb, s_present[idx],
                         (size_t)s_fb_width * s_fb_height * 4);
@@ -8713,7 +8773,7 @@ index 08bae4b..f12235a 100644
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -357,6 +948,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -357,6 +931,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              if (now - t0 >= 1000) {
                  LONG f = s_flips;
                  wchar_t tb[128];
@@ -8724,7 +8784,7 @@ index 08bae4b..f12235a 100644
                  _snwprintf(tb, 127, L"%ls | FPS: %.1f | draws: %ld", s_title,
                             t0 ? (f - f0) * 1000.0 / (now - t0) : 0.0,
                             (long)s_frame_draws);
-@@ -365,9 +960,12 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -365,9 +943,12 @@ static DWORD WINAPI fb_thread(LPVOID unused)
                  t0 = now; f0 = f;
              }
          }
@@ -8738,7 +8798,7 @@ index 08bae4b..f12235a 100644
      ReleaseDC(hwnd, hdc);
      DestroyWindow(hwnd);
      free(s_rgb);
-@@ -390,11 +988,4 @@ void xbox_FramebufferWindowStart(void)
+@@ -390,11 +971,4 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  
@@ -8750,1197 +8810,11 @@ index 08bae4b..f12235a 100644
 -void xbox_FramebufferWindowSetTitle(const uint16_t *n, int m) { (void)n; (void)m; }
 -void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
  #endif
-diff --git a/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
-new file mode 100644
-index 0000000..e87eca6
---- /dev/null
-+++ b/src/video/fb_present_sdl.c
-@@ -0,0 +1,491 @@
-+/**
-+ * POSIX counterpart of fb_present.c: show the guest framebuffer in an SDL2
-+ * window. Same contract (RECOMP_FB_WINDOW, flip-time copy, BMP dump, snap
-+ * trigger, keyboard state), minus the D3D11 presenter.
-+ */
-+#include <stdint.h>
-+
-+#if !defined(_WIN32)
-+#define _GNU_SOURCE
-+#include <SDL2/SDL.h>
-+#include <pthread.h>
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <string.h>
-+#include <stddef.h>
-+#include <time.h>
-+void xbox_FramebufferApplyGamma(uint32_t *px, size_t n);   /* fb_gamma.c */
-+#include <unistd.h>
-+
-+extern ptrdiff_t xbox_GetMemoryOffset(void);
-+
-+static volatile int  s_fb_running;
-+static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
-+static uint32_t     *s_rgb;
-+static uint32_t     *s_present[2];
-+static volatile int  s_present_idx = -1;
-+static volatile unsigned char s_key_down[256];
-+static int           s_key_presses[256];
-+static char          s_title[48] = "Xbox Recomp";
-+static volatile int  s_flips, s_frame_draws;
-+
-+/* The window's client area in pixels (see fb_present.c). */
-+static volatile int s_client_w, s_client_h;
-+
-+int xbox_FramebufferClientSize(int *w, int *h)
-+{
-+    int cw = __atomic_load_n(&s_client_w, __ATOMIC_RELAXED);
-+    int ch = __atomic_load_n(&s_client_h, __ATOMIC_RELAXED);
-+    if (cw <= 0 || ch <= 0)
-+        return 0;
-+    *w = cw; *h = ch;
-+    return 1;
-+}
-+
-+void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
-+{
-+    const char *pin = getenv("RECOMP_FB_VA");
-+
-+    s_fb_va = pin ? (uint32_t)strtoul(pin, NULL, 0) : fb_va;
-+    if (pitch)
-+        s_fb_pitch = pitch;
-+}
-+
-+static void fb_convert_row(const uint8_t *row, uint32_t *dst, uint32_t bpp)
-+{
-+    uint32_t x;
-+
-+    if (bpp == 4) {
-+        memcpy(dst, row, (size_t)s_fb_width * 4);
-+    } else if (bpp == 2) {
-+        const uint16_t *p = (const uint16_t *)row;
-+        for (x = 0; x < s_fb_width; x++) {
-+            uint16_t v = p[x];
-+            uint32_t r = (uint32_t)((v >> 11) & 0x1F) * 255u / 31u;
-+            uint32_t g = (uint32_t)((v >>  5) & 0x3F) * 255u / 63u;
-+            uint32_t b = (uint32_t)( v        & 0x1F) * 255u / 31u;
-+            dst[x] = (r << 16) | (g << 8) | b;
-+        }
-+    } else {
-+        memset(dst, 0, (size_t)s_fb_width * 4);
-+    }
-+}
-+
-+/* A GPU backend's own full-resolution frame (Vulkan, RECOMP_RES): shown
-+ * instead of the guest surface while it keeps coming. */
-+static pthread_mutex_t s_hi_lock = PTHREAD_MUTEX_INITIALIZER;
-+static uint32_t *s_hi;
-+static uint32_t  s_hi_w, s_hi_h;
-+static int       s_hi_new;
-+static double    s_hi_at;
-+
-+static double now_ms(void);
-+
-+void xbox_FramebufferPublishImage(const uint32_t *px, uint32_t w, uint32_t h)
-+{
-+    if (!px || !w || !h)
-+        return;
-+    pthread_mutex_lock(&s_hi_lock);
-+    if (w != s_hi_w || h != s_hi_h) {
-+        free(s_hi);
-+        s_hi = (uint32_t *)malloc((size_t)w * h * 4);
-+        s_hi_w = s_hi ? w : 0;
-+        s_hi_h = s_hi ? h : 0;
-+    }
-+    if (s_hi) {
-+        memcpy(s_hi, px, (size_t)w * h * 4);
-+        s_hi_new = 1;
-+        s_hi_at = now_ms();
-+    }
-+    pthread_mutex_unlock(&s_hi_lock);
-+}
-+
-+/* Called by the pushbuffer executor when the title flips. */
-+
-+void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
-+{
-+    const uint8_t *src;
-+    int next;
-+    uint32_t bpp, y;
-+
-+    if (!s_fb_running || !fb_va || !pitch)
-+        return;
-+    if (getenv("RECOMP_FB_VA"))
-+        return;
-+    next = (s_present_idx == 0) ? 1 : 0;
-+    if (!s_present[next]) {
-+        s_present[next] = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
-+        if (!s_present[next])
-+            return;
-+    }
-+    bpp = pitch / s_fb_width;
-+    src = (const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset());
-+    for (y = 0; y < s_fb_height; y++)
-+        fb_convert_row(src + (size_t)y * pitch,
-+                       s_present[next] + (size_t)y * s_fb_width, bpp);
-+    __atomic_store_n(&s_present_idx, next, __ATOMIC_RELEASE);
-+}
-+
-+void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
-+{
-+    int i;
-+
-+    for (i = 0; i < max_chars && i < 47 && name[i]; i++)
-+        s_title[i] = (char)name[i];
-+    if (i)
-+        s_title[i] = 0;
-+}
-+
-+static double now_ms(void)
-+{
-+    struct timespec ts;
-+
-+    clock_gettime(CLOCK_MONOTONIC, &ts);
-+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-+}
-+
-+static int cmp_double(const void *a, const void *b)
-+{
-+    double x = *(const double *)a, y = *(const double *)b;
-+    return x < y ? -1 : x > y;
-+}
-+
-+/* RECOMP_FRAME_STATS=1: [FRAMES] line once a second, as on Windows. */
-+void xbox_FramebufferWindowFrameStats(uint32_t draws)
-+{
-+    static int on = -1;
-+    static double last, window, dt[2048];
-+    static int n;
-+    double t;
-+
-+    __atomic_fetch_add(&s_flips, 1, __ATOMIC_RELAXED);
-+    s_frame_draws = (int)draws;
-+    if (on < 0) {
-+        const char *e = getenv("RECOMP_FRAME_STATS");
-+        on = e && *e && *e != '0';
-+    }
-+    if (!on)
-+        return;
-+    t = now_ms();
-+    if (last && n < (int)(sizeof dt / sizeof dt[0]))
-+        dt[n++] = t - last;
-+    last = t;
-+    if (!window)
-+        window = t;
-+    if (t - window >= 1000.0 && n) {
-+        double secs = (t - window) / 1000.0;
-+        qsort(dt, (size_t)n, sizeof dt[0], cmp_double);
-+        fprintf(stderr, "[FRAMES] n %d fps %.1f p50 %.1f p99 %.1f max %.1f ms draws %u\n",
-+                n, n / secs, dt[n / 2],
-+                dt[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1], dt[n - 1], draws);
-+        n = 0;
-+        window = t;
-+    }
-+}
-+
-+int xbox_FramebufferKeyDown(int vk)
-+{
-+    if ((unsigned)vk > 255)
-+        return 0;
-+    return s_key_down[vk] != 0;
-+}
-+
-+int xbox_FramebufferKeyPresses(int vk)
-+{
-+    if ((unsigned)vk > 255)
-+        return 0;
-+    return __atomic_exchange_n(&s_key_presses[vk], 0, __ATOMIC_ACQ_REL);
-+}
-+
-+/* SDL keycode -> Windows virtual-key code, for the keyboard pad stand-in. */
-+static int sdl_to_vk(SDL_Keycode k)
-+{
-+    if (k >= 'a' && k <= 'z') return k - 'a' + 0x41;
-+    if (k >= '0' && k <= '9') return k;
-+    if (k >= SDLK_F1 && k <= SDLK_F12) return 0x70 + (k - SDLK_F1);
-+    if (k >= SDLK_KP_1 && k <= SDLK_KP_9) return 0x61 + (k - SDLK_KP_1);
-+    switch (k) {
-+    case SDLK_KP_0: return 0x60;
-+    case SDLK_RETURN: return 0x0D;   case SDLK_ESCAPE: return 0x1B;
-+    case SDLK_SPACE: return 0x20;    case SDLK_TAB: return 0x09;
-+    case SDLK_BACKSPACE: return 0x08;
-+    case SDLK_LEFT: return 0x25;     case SDLK_UP: return 0x26;
-+    case SDLK_RIGHT: return 0x27;    case SDLK_DOWN: return 0x28;
-+    case SDLK_LSHIFT: case SDLK_RSHIFT: return 0x10;
-+    case SDLK_LCTRL: case SDLK_RCTRL: return 0x11;
-+    case SDLK_LALT: case SDLK_RALT: return 0x12;
-+    case SDLK_COMMA: return 0xBC;    case SDLK_PERIOD: return 0xBE;
-+    case SDLK_MINUS: return 0xBD;    case SDLK_EQUALS: return 0xBB;
-+    case SDLK_DELETE: return 0x2E;   case SDLK_HOME: return 0x24;
-+    case SDLK_END: return 0x23;      case SDLK_PAGEUP: return 0x21;
-+    case SDLK_PAGEDOWN: return 0x22; case SDLK_INSERT: return 0x2D;
-+    default: return 0;
-+    }
-+}
-+
-+static int s_dump_quiet;
-+
-+/* px: w*h pixels, 0xAARRGGBB, top row first. */
-+static int write_bmp(const char *path, const uint32_t *px, uint32_t w, uint32_t h)
-+{
-+    FILE *f;
-+    uint32_t row = ((w * 3u) + 3u) & ~3u;
-+    uint32_t img = row * h, total = 54u + img, y, x;
-+    uint8_t hdr[54], *line;
-+
-+    f = fopen(path, "wb");
-+    if (!f)
-+        return -1;
-+    memset(hdr, 0, sizeof(hdr));
-+    hdr[0] = 'B'; hdr[1] = 'M';
-+    memcpy(hdr + 2, &total, 4);
-+    hdr[10] = 54; hdr[14] = 40;
-+    memcpy(hdr + 18, &w, 4);
-+    memcpy(hdr + 22, &h, 4);
-+    hdr[26] = 1; hdr[28] = 24;
-+    memcpy(hdr + 34, &img, 4);
-+    fwrite(hdr, 1, sizeof(hdr), f);
-+    line = (uint8_t *)calloc(1, row);
-+    for (y = 0; y < h; y++) {
-+        const uint32_t *src = px + (size_t)(h - 1 - y) * w;
-+        for (x = 0; x < w; x++) {
-+            line[x * 3 + 0] = (uint8_t)(src[x] & 0xFF);
-+            line[x * 3 + 1] = (uint8_t)((src[x] >> 8) & 0xFF);
-+            line[x * 3 + 2] = (uint8_t)((src[x] >> 16) & 0xFF);
-+        }
-+        fwrite(line, 1, row, f);
-+    }
-+    free(line);
-+    fclose(f);
-+    return 0;
-+}
-+
-+int xbox_FramebufferDumpBmp(const char *path)
-+{
-+    if (!s_rgb || !s_fb_va)
-+        return -1;
-+    if (write_bmp(path, s_rgb, s_fb_width, s_fb_height))
-+        return -1;
-+    if (!s_dump_quiet)
-+        fprintf(stderr, "  [FBWIN] wrote %s (%ux%u from 0x%08X)\n",
-+                path, s_fb_width, s_fb_height, s_fb_va);
-+    return 0;
-+}
-+
-+/* RECOMP_SNAP_TRIGGER=<file>: when it appears, dump the shown frame to the BMP
-+ * path it contains and delete it. hi: the GPU backend's full-resolution frame
-+ * when that is what the window shows (s_rgb is not updated then). */
-+static void snap_trigger_poll(const uint32_t *hi, uint32_t hi_w, uint32_t hi_h)
-+{
-+    (void)hi; (void)hi_w; (void)hi_h;   /* the published frame (s_hi) is used */
-+    static int checked;
-+    static const char *trig;
-+    FILE *f;
-+    char path[1024];
-+    size_t n;
-+
-+    if (!checked) {
-+        checked = 1;
-+        trig = getenv("RECOMP_SNAP_TRIGGER");
-+    }
-+    if (!trig || access(trig, F_OK) != 0)
-+        return;
-+    f = fopen(trig, "rb");
-+    if (!f)
-+        return;
-+    n = fread(path, 1, sizeof path - 1, f);
-+    fclose(f);
-+    while (n && (path[n - 1] == '\n' || path[n - 1] == '\r' || path[n - 1] == ' '))
-+        n--;
-+    path[n] = 0;
-+    unlink(trig);
-+    if (!n)
-+        return;
-+    xbox_FramebufferSnapshot(path);
-+}
-+
-+void xbox_FramebufferSnapshot(const char *path)
-+{
-+    /* The image the window shows: a renderer's published frame (Vulkan, at
-+     * the internal resolution and in widescreen) when there is a current
-+     * one, else the guest framebuffer, which that renderer leaves unused. */
-+    pthread_mutex_lock(&s_hi_lock);
-+    if (s_hi && now_ms() - s_hi_at < 250.0) {
-+        write_bmp(path, s_hi, s_hi_w, s_hi_h);
-+        pthread_mutex_unlock(&s_hi_lock);
-+        return;
-+    }
-+    pthread_mutex_unlock(&s_hi_lock);
-+    s_dump_quiet = 1;
-+    xbox_FramebufferDumpBmp(path);
-+    s_dump_quiet = 0;
-+}
-+
-+static void *fb_thread(void *unused)
-+{
-+    SDL_Window *win;
-+    SDL_Renderer *ren;
-+    SDL_Texture *tex, *hi_tex = NULL;
-+    uint32_t *hi_rgb = NULL, hi_w = 0, hi_h = 0;
-+    double t0 = 0;
-+    int f0 = 0;
-+
-+    (void)unused;
-+    if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
-+        fprintf(stderr, "  [FBWIN] SDL video init failed: %s\n", SDL_GetError());
-+        s_fb_running = 0;
-+        return NULL;
-+    }
-+    win = SDL_CreateWindow("Xbox Recomp - Framebuffer",
-+                           SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-+                           (int)s_fb_width, (int)s_fb_height,
-+                           SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-+    ren = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC) : NULL;
-+    tex = ren ? SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
-+                                  SDL_TEXTUREACCESS_STREAMING,
-+                                  (int)s_fb_width, (int)s_fb_height) : NULL;
-+    if (!tex) {
-+        fprintf(stderr, "  [FBWIN] window setup failed: %s\n", SDL_GetError());
-+        s_fb_running = 0;
-+        return NULL;
-+    }
-+    SDL_RenderSetLogicalSize(ren, (int)s_fb_width, (int)s_fb_height);
-+    s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
-+    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
-+            s_fb_width, s_fb_height);
-+
-+    while (s_fb_running) {
-+        SDL_Event e;
-+        int idx;
-+
-+        while (SDL_PollEvent(&e)) {
-+            if (e.type == SDL_QUIT) {
-+                /* Window close, and SDL turns SIGINT/SIGTERM into this too.
-+                 * Closing only the window left the game running and the
-+                 * next flip reopened it. */
-+                fflush(NULL);
-+                _exit(0);
-+            } else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
-+                int vk = sdl_to_vk(e.key.keysym.sym);
-+                /* RECOMP_KEY_TRACE: each key as it arrives, as in fb_present.c,
-+                 * with SDL's name for it -- tells "never reached the window"
-+                 * (a desktop shortcut or media key) from "arrived unmapped". */
-+                {
-+                    static int trace = -1, n;
-+                    if (trace < 0)
-+                        trace = getenv("RECOMP_KEY_TRACE") != NULL;
-+                    if (trace && e.type == SDL_KEYDOWN && !e.key.repeat && n++ < 200) {
-+                        fprintf(stderr, "  [KEY] down %s (sym 0x%X) vk=0x%02X\n",
-+                                SDL_GetKeyName(e.key.keysym.sym), (unsigned)e.key.keysym.sym, vk);
-+                        fflush(stderr);
-+                    }
-+                }
-+                if (vk) {
-+                    s_key_down[vk] = e.type == SDL_KEYDOWN;
-+                    if (e.type == SDL_KEYDOWN && !e.key.repeat)
-+                        __atomic_add_fetch(&s_key_presses[vk], 1, __ATOMIC_RELEASE);
-+                }
-+            } else if (e.type == SDL_WINDOWEVENT &&
-+                       e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-+                memset((void *)s_key_down, 0, sizeof s_key_down);
-+                fprintf(stderr, "[FBWIN] focus lost\n");
-+            } else if (e.type == SDL_WINDOWEVENT &&
-+                       e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
-+                fprintf(stderr, "[FBWIN] focus gained\n");
-+            }
-+        }
-+        if (!(SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED)) {
-+            int cw, ch;
-+            SDL_GetWindowSize(win, &cw, &ch);
-+            __atomic_store_n(&s_client_w, cw, __ATOMIC_RELAXED);
-+            __atomic_store_n(&s_client_h, ch, __ATOMIC_RELAXED);
-+        }
-+        pthread_mutex_lock(&s_hi_lock);
-+        if (s_hi && now_ms() - s_hi_at < 250.0) {
-+            int fresh = s_hi_new;
-+            if (s_hi_w != hi_w || s_hi_h != hi_h) {
-+                if (hi_tex) SDL_DestroyTexture(hi_tex);
-+                free(hi_rgb);
-+                hi_w = s_hi_w; hi_h = s_hi_h;
-+                hi_rgb = (uint32_t *)malloc((size_t)hi_w * hi_h * 4);
-+                hi_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
-+                                           SDL_TEXTUREACCESS_STREAMING, (int)hi_w, (int)hi_h);
-+                SDL_RenderSetLogicalSize(ren, (int)hi_w, (int)hi_h);
-+                fresh = 1;
-+            }
-+            if (fresh && hi_rgb)
-+                memcpy(hi_rgb, s_hi, (size_t)hi_w * hi_h * 4);
-+            s_hi_new = 0;
-+            pthread_mutex_unlock(&s_hi_lock);
-+            if (hi_tex && hi_rgb) {
-+                if (fresh) {
-+                    xbox_FramebufferApplyGamma(hi_rgb, (size_t)hi_w * hi_h);
-+                    SDL_UpdateTexture(hi_tex, NULL, hi_rgb, (int)(hi_w * 4));
-+                }
-+                SDL_RenderClear(ren);
-+                SDL_RenderCopy(ren, hi_tex, NULL, NULL);
-+                SDL_RenderPresent(ren);
-+                snap_trigger_poll(hi_rgb, hi_w, hi_h);
-+                goto shown;
-+            }
-+        } else {
-+            pthread_mutex_unlock(&s_hi_lock);
-+            if (hi_tex) {
-+                SDL_DestroyTexture(hi_tex);
-+                hi_tex = NULL;
-+                hi_w = hi_h = 0;
-+                SDL_RenderSetLogicalSize(ren, (int)s_fb_width, (int)s_fb_height);
-+            }
-+        }
-+        idx = __atomic_load_n(&s_present_idx, __ATOMIC_ACQUIRE);
-+        if (idx >= 0 && s_present[idx])
-+            memcpy(s_rgb, s_present[idx], (size_t)s_fb_width * s_fb_height * 4);
-+        else if (s_fb_va && s_fb_pitch) {
-+            const uint8_t *src = (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
-+            uint32_t y;
-+            for (y = 0; y < s_fb_height; y++)
-+                fb_convert_row(src + (size_t)y * s_fb_pitch,
-+                               s_rgb + (size_t)y * s_fb_width,
-+                               s_fb_pitch / s_fb_width);
-+        }
-+        xbox_FramebufferApplyGamma(s_rgb, (size_t)s_fb_width * s_fb_height);
-+        SDL_UpdateTexture(tex, NULL, s_rgb, (int)(s_fb_width * 4));
-+        SDL_RenderClear(ren);
-+        SDL_RenderCopy(ren, tex, NULL, NULL);
-+        SDL_RenderPresent(ren);
-+        snap_trigger_poll(NULL, 0, 0);
-+shown:
-+        {
-+            double now = now_ms();
-+            if (now - t0 >= 1000.0) {
-+                int f = s_flips;
-+                char tb[128];
-+                snprintf(tb, sizeof tb, "%s | FPS: %.1f | draws: %d", s_title,
-+                         t0 ? (f - f0) * 1000.0 / (now - t0) : 0.0, s_frame_draws);
-+                SDL_SetWindowTitle(win, tb);
-+                t0 = now; f0 = f;
-+            }
-+        }
-+    }
-+    if (hi_tex) SDL_DestroyTexture(hi_tex);
-+    free(hi_rgb);
-+    SDL_DestroyTexture(tex);
-+    SDL_DestroyRenderer(ren);
-+    SDL_DestroyWindow(win);
-+    return NULL;
-+}
-+
-+void xbox_FramebufferWindowStart(void)
-+{
-+    pthread_t th;
-+
-+    if (!getenv("RECOMP_FB_WINDOW"))
-+        return;
-+    if (__sync_val_compare_and_swap(&s_fb_running, 0, 1) != 0)
-+        return;
-+    if (pthread_create(&th, NULL, fb_thread, NULL) == 0)
-+        pthread_detach(th);
-+    else
-+        s_fb_running = 0;
-+}
-+#endif /* !_WIN32 */
-diff --git a/src/video/fb_present_web.c b/src/video/fb_present_web.c
-new file mode 100644
-index 0000000..4f2e829
---- /dev/null
-+++ b/src/video/fb_present_web.c
-@@ -0,0 +1,273 @@
-+/**
-+ * Browser counterpart of fb_present_sdl.c: the guest framebuffer for a page.
-+ *
-+ * There is no window thread. At each flip the executor converts the guest
-+ * surface into one of two RGBA buffers (canvas byte order, gamma applied);
-+ * the page's requestAnimationFrame loop asks web_frame() for the newest one
-+ * and copies it into its canvas. Keys come from the page through web_key().
-+ * Same contract otherwise: RECOMP_FB_WINDOW, frame stats, BMP dump,
-+ * xbox_FramebufferKeyDown.
-+ */
-+#include <stdint.h>
-+
-+#if defined(__EMSCRIPTEN__)
-+#include <emscripten.h>
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <string.h>
-+#include <stddef.h>
-+#include <time.h>
-+#include <unistd.h>
-+void xbox_FramebufferApplyGamma(uint32_t *px, size_t n);   /* fb_gamma.c */
-+extern void *xbox_GuestToHost(uint32_t va);                 /* xbox_memory_layout.c */
-+
-+static volatile int  s_fb_running;
-+static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
-+static uint32_t     *s_present[2];
-+static volatile int  s_present_idx = -1;
-+static volatile uint32_t s_present_seq;
-+static volatile unsigned char s_key_down[256];
-+static char          s_title[48] = "Xbox Recomp";
-+static volatile int  s_flips, s_frame_draws;
-+static volatile int  s_client_w, s_client_h;
-+
-+int xbox_FramebufferClientSize(int *w, int *h)
-+{
-+    int cw = __atomic_load_n(&s_client_w, __ATOMIC_RELAXED);
-+    int ch = __atomic_load_n(&s_client_h, __ATOMIC_RELAXED);
-+    if (cw <= 0 || ch <= 0)
-+        return 0;
-+    *w = cw; *h = ch;
-+    return 1;
-+}
-+
-+void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
-+{
-+    const char *pin = getenv("RECOMP_FB_VA");
-+
-+    s_fb_va = pin ? (uint32_t)strtoul(pin, NULL, 0) : fb_va;
-+    if (pitch)
-+        s_fb_pitch = pitch;
-+}
-+
-+/* Guest row (X8R8G8B8 or R5G6B5) -> 0xAARRGGBB words. */
-+static void fb_convert_row(const uint8_t *row, uint32_t *dst, uint32_t bpp)
-+{
-+    uint32_t x;
-+
-+    if (bpp == 4) {
-+        memcpy(dst, row, (size_t)s_fb_width * 4);
-+    } else if (bpp == 2) {
-+        const uint16_t *p = (const uint16_t *)row;
-+        for (x = 0; x < s_fb_width; x++) {
-+            uint16_t v = p[x];
-+            uint32_t r = (uint32_t)((v >> 11) & 0x1F) * 255u / 31u;
-+            uint32_t g = (uint32_t)((v >>  5) & 0x3F) * 255u / 63u;
-+            uint32_t b = (uint32_t)( v        & 0x1F) * 255u / 31u;
-+            dst[x] = (r << 16) | (g << 8) | b;
-+        }
-+    } else {
-+        memset(dst, 0, (size_t)s_fb_width * 4);
-+    }
-+}
-+
-+/* 0xAARRGGBB words -> R,G,B,255 bytes, the canvas's ImageData order. */
-+static void to_canvas_order(uint32_t *px, size_t n)
-+{
-+    size_t i;
-+    for (i = 0; i < n; i++) {
-+        uint32_t v = px[i];
-+        px[i] = 0xFF000000u | ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
-+    }
-+}
-+
-+void xbox_FramebufferPublishImage(const uint32_t *px, uint32_t w, uint32_t h)
-+{
-+    (void)px; (void)w; (void)h;
-+}
-+
-+/* Called by the pushbuffer executor when the title flips. */
-+void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
-+{
-+    const uint8_t *src;
-+    int next;
-+    uint32_t bpp, y;
-+    size_t n = (size_t)s_fb_width * s_fb_height;
-+
-+    static int gpu = -1;
-+
-+    if (!s_fb_running || !fb_va || !pitch)
-+        return;
-+    if (gpu < 0)        /* the page's WebGPU renderer shows its frames itself */
-+        gpu = getenv("RECOMP_WEBGPU") != NULL && !(getenv("RECOMP_GPU") && *getenv("RECOMP_GPU") == 's');
-+    if (gpu || getenv("RECOMP_FB_VA"))
-+        return;
-+    next = (s_present_idx == 0) ? 1 : 0;
-+    if (!s_present[next]) {
-+        s_present[next] = (uint32_t *)calloc(n, 4);
-+        if (!s_present[next])
-+            return;
-+    }
-+    bpp = pitch / s_fb_width;
-+    src = (const uint8_t *)xbox_GuestToHost(fb_va);
-+    for (y = 0; y < s_fb_height; y++)
-+        fb_convert_row(src + (size_t)y * pitch,
-+                       s_present[next] + (size_t)y * s_fb_width, bpp);
-+    xbox_FramebufferApplyGamma(s_present[next], n);
-+    to_canvas_order(s_present[next], n);
-+    __atomic_store_n(&s_present_idx, next, __ATOMIC_RELEASE);
-+    __atomic_fetch_add(&s_present_seq, 1, __ATOMIC_RELEASE);
-+}
-+
-+/* For the page, once per animation frame. Out: info[0..4] = width, height,
-+ * frame sequence number, flips so far, draws in the last frame. In:
-+ * info[6], info[7] = the canvas's display size. Returns the newest frame
-+ * (RGBA bytes), or 0 before the first flip. */
-+EMSCRIPTEN_KEEPALIVE uint32_t *web_frame(int32_t *info)
-+{
-+    int idx = __atomic_load_n(&s_present_idx, __ATOMIC_ACQUIRE);
-+
-+    info[0] = (int32_t)s_fb_width;
-+    info[1] = (int32_t)s_fb_height;
-+    info[2] = (int32_t)__atomic_load_n(&s_present_seq, __ATOMIC_ACQUIRE);
-+    info[3] = s_flips;
-+    info[4] = s_frame_draws;
-+    if (info[6] > 0 && info[7] > 0) {
-+        __atomic_store_n(&s_client_w, info[6], __ATOMIC_RELAXED);
-+        __atomic_store_n(&s_client_h, info[7], __ATOMIC_RELAXED);
-+    }
-+    return idx >= 0 ? s_present[idx] : 0;
-+}
-+
-+void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
-+{
-+    int i;
-+
-+    for (i = 0; i < max_chars && i < 47 && name[i]; i++)
-+        s_title[i] = (char)name[i];
-+    if (i)
-+        s_title[i] = 0;
-+}
-+
-+static double now_ms(void)
-+{
-+    struct timespec ts;
-+
-+    clock_gettime(CLOCK_MONOTONIC, &ts);
-+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-+}
-+
-+static int cmp_double(const void *a, const void *b)
-+{
-+    double x = *(const double *)a, y = *(const double *)b;
-+    return x < y ? -1 : x > y;
-+}
-+
-+/* RECOMP_FRAME_STATS=1: [FRAMES] line once a second, as on the other hosts. */
-+void xbox_FramebufferWindowFrameStats(uint32_t draws)
-+{
-+    static int on = -1;
-+    static double last, window, dt[2048];
-+    static int n;
-+    double t;
-+
-+    __atomic_fetch_add(&s_flips, 1, __ATOMIC_RELAXED);
-+    s_frame_draws = (int)draws;
-+    if (on < 0) {
-+        const char *e = getenv("RECOMP_FRAME_STATS");
-+        on = e && *e && *e != '0';
-+    }
-+    if (!on)
-+        return;
-+    t = now_ms();
-+    if (last && n < (int)(sizeof dt / sizeof dt[0]))
-+        dt[n++] = t - last;
-+    last = t;
-+    if (!window)
-+        window = t;
-+    if (t - window >= 1000.0 && n) {
-+        double secs = (t - window) / 1000.0;
-+        qsort(dt, (size_t)n, sizeof dt[0], cmp_double);
-+        fprintf(stderr, "[FRAMES] n %d fps %.1f p50 %.1f p99 %.1f max %.1f ms draws %u\n",
-+                n, n / secs, dt[n / 2],
-+                dt[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1], dt[n - 1], draws);
-+        n = 0;
-+        window = t;
-+    }
-+}
-+
-+int xbox_FramebufferKeyDown(int vk)
-+{
-+    if ((unsigned)vk > 255)
-+        return 0;
-+    return s_key_down[vk] != 0;
-+}
-+
-+/* Called from the page with a Windows virtual-key code (web/ maps
-+ * KeyboardEvent.code); vk < 0 releases every key (focus lost). */
-+EMSCRIPTEN_KEEPALIVE void web_key(int vk, int down)
-+{
-+    if (vk < 0) {
-+        memset((void *)s_key_down, 0, sizeof s_key_down);
-+        return;
-+    }
-+    if (vk < 256)
-+        s_key_down[vk] = down != 0;
-+}
-+
-+int xbox_FramebufferDumpBmp(const char *path)
-+{
-+    FILE *f;
-+    uint32_t row = ((s_fb_width * 3u) + 3u) & ~3u;
-+    uint32_t img = row * s_fb_height, total = 54u + img, y, x;
-+    uint8_t hdr[54], *line;
-+    int idx = __atomic_load_n(&s_present_idx, __ATOMIC_ACQUIRE);
-+    const uint32_t *px;
-+
-+    if (idx < 0 || !s_present[idx])
-+        return -1;
-+    px = s_present[idx];
-+    f = fopen(path, "wb");
-+    if (!f)
-+        return -1;
-+    memset(hdr, 0, sizeof(hdr));
-+    hdr[0] = 'B'; hdr[1] = 'M';
-+    memcpy(hdr + 2, &total, 4);
-+    hdr[10] = 54; hdr[14] = 40;
-+    memcpy(hdr + 18, &s_fb_width, 4);
-+    memcpy(hdr + 22, &s_fb_height, 4);
-+    hdr[26] = 1; hdr[28] = 24;
-+    memcpy(hdr + 34, &img, 4);
-+    fwrite(hdr, 1, sizeof(hdr), f);
-+    line = (uint8_t *)calloc(1, row);
-+    for (y = 0; y < s_fb_height; y++) {
-+        const uint32_t *src = px + (size_t)(s_fb_height - 1 - y) * s_fb_width;
-+        for (x = 0; x < s_fb_width; x++) {          /* canvas order R,G,B,A */
-+            line[x * 3 + 0] = (uint8_t)((src[x] >> 16) & 0xFF);
-+            line[x * 3 + 1] = (uint8_t)((src[x] >> 8) & 0xFF);
-+            line[x * 3 + 2] = (uint8_t)(src[x] & 0xFF);
-+        }
-+        fwrite(line, 1, row, f);
-+    }
-+    free(line);
-+    fclose(f);
-+    fprintf(stderr, "  [FBWIN] wrote %s (%ux%u from 0x%08X)\n",
-+            path, s_fb_width, s_fb_height, s_fb_va);
-+    return 0;
-+}
-+
-+void xbox_FramebufferSnapshot(const char *path)
-+{
-+    xbox_FramebufferDumpBmp(path);
-+}
-+
-+void xbox_FramebufferWindowStart(void)
-+{
-+    if (!getenv("RECOMP_FB_WINDOW"))
-+        return;
-+    if (__sync_val_compare_and_swap(&s_fb_running, 0, 1) != 0)
-+        return;
-+    fprintf(stderr, "  [FBWIN] presenting to the page (%ux%u)\n",
-+            s_fb_width, s_fb_height);
-+}
-+#endif /* __EMSCRIPTEN__ */
-diff --git a/src/video/gpu_present.c b/src/video/gpu_present.c
-new file mode 100644
-index 0000000..7b3408b
---- /dev/null
-+++ b/src/video/gpu_present.c
-@@ -0,0 +1,381 @@
-+/*
-+ * D3D11 presentation for the framebuffer window (ROADMAP Phase 2.1).
-+ *
-+ * The window used to show each frame with GDI (StretchDIBits on a 16 ms
-+ * timer). This puts a D3D11 device and a swap chain on the same window and
-+ * presents the flipped frame through it, vsync-paced. The frame (the guest's
-+ * A8R8G8B8, i.e. B8G8R8A8 in memory order) is uploaded into its own texture
-+ * and drawn into a back buffer the size of the window's client area,
-+ * letterboxed to the frame's aspect ratio on black -- the window can be any
-+ * size (or borderless fullscreen, fb_present.c) without stretching the
-+ * picture. Linear filtering; RECOMP_PRESENT_FILTER=point for sharp pixels.
-+ * RECOMP_D3D_PRESENT=0 keeps GDI; anything that fails falls back to it.
-+ */
-+#if defined(_WIN32)
-+#define COBJMACROS
-+#include <windows.h>
-+#include <d3d11.h>
-+#include <dxgi.h>
-+#include <d3dcompiler.h>
-+#include <stdio.h>
-+#include <stdint.h>
-+#include <stdlib.h>
-+#include <string.h>
-+#include "gpu_present.h"
-+
-+#pragma comment(lib, "d3d11.lib")
-+#pragma comment(lib, "dxgi.lib")
-+#pragma comment(lib, "d3dcompiler.lib")
-+
-+static ID3D11Device             *s_dev;
-+static ID3D11DeviceContext      *s_ctx;
-+static IDXGISwapChain           *s_chain;
-+static ID3D11RenderTargetView   *s_rtv;
-+static ID3D11Texture2D          *s_frame;      /* the guest frame, w x h */
-+static ID3D11ShaderResourceView *s_srv;
-+static ID3D11SamplerState       *s_samp;
-+static ID3D11VertexShader       *s_vs;
-+static ID3D11PixelShader        *s_ps;
-+static ID3D11PixelShader        *s_ps_gamma;   /* + the title's gamma ramp */
-+static ID3D11Texture2D          *s_lut;        /* 256 x 1, the ramp (fb_gamma.c) */
-+static ID3D11ShaderResourceView *s_lut_srv;
-+static unsigned                  s_lut_serial = ~0u;
-+static char                      s_capture[MAX_PATH];  /* gpu_present_capture: pending */
-+static volatile LONG             s_capture_pending;
-+
-+/* The next presented image (back buffer: letterbox, overlay and gamma
-+ * included -- what the window shows) as a 24-bit BMP. RECOMP_SNAP_PRESENTED=1
-+ * routes the snapshot trigger here (fb_present.c). */
-+void gpu_present_capture(const char *path)
-+{
-+    strncpy(s_capture, path, sizeof s_capture - 1);
-+    s_capture[sizeof s_capture - 1] = 0;
-+    InterlockedExchange(&s_capture_pending, 1);
-+}
-+
-+static void capture_back_buffer(void)
-+{
-+    ID3D11Texture2D *back = NULL, *stg = NULL;
-+    D3D11_TEXTURE2D_DESC td;
-+    D3D11_MAPPED_SUBRESOURCE m;
-+    FILE *f;
-+    if (FAILED(IDXGISwapChain_GetBuffer(s_chain, 0, &IID_ID3D11Texture2D, (void **)&back)))
-+        return;
-+    ID3D11Texture2D_GetDesc(back, &td);
-+    td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-+    td.MiscFlags = 0;
-+    if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &stg))) {
-+        ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)stg, (ID3D11Resource *)back);
-+        if (SUCCEEDED(ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)stg, 0, D3D11_MAP_READ, 0, &m))) {
-+            if ((f = fopen(s_capture, "wb")) != NULL) {
-+                uint32_t row = (td.Width * 3u + 3u) & ~3u, img = row * td.Height, y, x;
-+                uint8_t hdr[54] = {'B', 'M'}, *line = (uint8_t *)calloc(1, row);
-+                uint32_t total = 54u + img;
-+                memcpy(hdr + 2, &total, 4); hdr[10] = 54; hdr[14] = 40;
-+                memcpy(hdr + 18, &td.Width, 4); memcpy(hdr + 22, &td.Height, 4);
-+                hdr[26] = 1; hdr[28] = 24; memcpy(hdr + 34, &img, 4);
-+                fwrite(hdr, 1, 54, f);
-+                for (y = td.Height; line && y-- > 0;) {
-+                    const uint8_t *src = (const uint8_t *)m.pData + (size_t)y * m.RowPitch;
-+                    for (x = 0; x < td.Width; x++) {
-+                        line[x * 3] = src[x * 4]; line[x * 3 + 1] = src[x * 4 + 1];
-+                        line[x * 3 + 2] = src[x * 4 + 2];
-+                    }
-+                    fwrite(line, 1, row, f);
-+                }
-+                free(line);
-+                fclose(f);
-+            }
-+            ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)stg, 0);
-+        }
-+        ID3D11Texture2D_Release(stg);
-+    }
-+    ID3D11Texture2D_Release(back);
-+}
-+static HWND                      s_hwnd;
-+static uint32_t                  s_w, s_h;      /* frame size */
-+static uint32_t                  s_bw, s_bh;    /* back buffer (client) size */
-+static int                       s_vsync = 1;
-+
-+/* A triangle covering the viewport, from the vertex id; uv 0..1. */
-+static const char s_hlsl[] =
-+    "Texture2D t : register(t0); SamplerState s : register(s0);\n"
-+    "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
-+    "V vs(uint i : SV_VertexID) { V o; float2 q = float2((i << 1) & 2, i & 2);\n"
-+    "  o.uv = q; o.p = float4(q * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
-+    "float4 ps(V i) : SV_Target { return float4(t.Sample(s, i.uv).rgb, 1); }\n"
-+    "Texture2D lut : register(t1);\n"
-+    "float4 psg(V i) : SV_Target { int3 c = int3(saturate(t.Sample(s, i.uv).rgb) * 255.0 + 0.5);\n"
-+    "  return float4(lut.Load(int3(c.r, 0, 0)).r, lut.Load(int3(c.g, 0, 0)).g,\n"
-+    "                lut.Load(int3(c.b, 0, 0)).b, 1); }\n";
-+
-+int gpu_present_enabled(void)
-+{
-+    static int on = -1;
-+    if (on < 0) {
-+        const char *e = getenv("RECOMP_D3D_PRESENT");
-+        on = e && *e && *e != '0';
-+    }
-+    return on;
-+}
-+
-+static void client_size(uint32_t *w, uint32_t *h)
-+{
-+    RECT r;
-+    GetClientRect(s_hwnd, &r);
-+    *w = r.right > r.left ? (uint32_t)(r.right - r.left) : 1;
-+    *h = r.bottom > r.top ? (uint32_t)(r.bottom - r.top) : 1;
-+}
-+
-+static int make_rtv(void)
-+{
-+    ID3D11Texture2D *back = NULL;
-+    HRESULT hr = IDXGISwapChain_GetBuffer(s_chain, 0, &IID_ID3D11Texture2D, (void **)&back);
-+    if (FAILED(hr))
-+        return 0;
-+    hr = ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)back, NULL, &s_rtv);
-+    ID3D11Texture2D_Release(back);
-+    return SUCCEEDED(hr);
-+}
-+
-+static ID3DBlob *compile(const char *entry, const char *target)
-+{
-+    ID3DBlob *code = NULL, *err = NULL;
-+    HRESULT hr = D3DCompile(s_hlsl, sizeof s_hlsl - 1, "present", NULL, NULL, entry, target,
-+                            0, 0, &code, &err);
-+    if (FAILED(hr)) {
-+        fprintf(stderr, "  [D3D] present shader %s: %s\n", entry,
-+                err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "failed");
-+        if (err) ID3D10Blob_Release(err);
-+        return NULL;
-+    }
-+    if (err) ID3D10Blob_Release(err);
-+    return code;
-+}
-+
-+int gpu_present_init(HWND hwnd, uint32_t width, uint32_t height)
-+{
-+    DXGI_SWAP_CHAIN_DESC sd;
-+    D3D11_TEXTURE2D_DESC td;
-+    D3D11_SAMPLER_DESC smp;
-+    ID3DBlob *vsb, *psb;
-+    HRESULT hr;
-+    const char *v = getenv("RECOMP_VSYNC"), *f = getenv("RECOMP_PRESENT_FILTER");
-+
-+    if (v && v[0] == '0')
-+        s_vsync = 0;
-+    s_hwnd = hwnd;
-+    s_w = width; s_h = height;
-+    client_size(&s_bw, &s_bh);
-+    ZeroMemory(&sd, sizeof sd);
-+    sd.BufferDesc.Width  = s_bw;
-+    sd.BufferDesc.Height = s_bh;
-+    sd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-+    sd.SampleDesc.Count  = 1;
-+    sd.BufferUsage       = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-+    sd.BufferCount       = 1;
-+    sd.OutputWindow      = hwnd;
-+    sd.Windowed          = TRUE;
-+    sd.SwapEffect        = DXGI_SWAP_EFFECT_DISCARD;
-+
-+    hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
-+                                       NULL, 0, D3D11_SDK_VERSION, &sd,
-+                                       &s_chain, &s_dev, NULL, &s_ctx);
-+    if (FAILED(hr)) {
-+        fprintf(stderr, "  [D3D] device/swap chain failed (0x%08lX); staying on GDI\n",
-+                (unsigned long)hr);
-+        return 0;
-+    }
-+    {
-+        /* Alt+Enter is the window's (borderless fullscreen, fb_present.c),
-+         * not DXGI's exclusive mode at 640x480. */
-+        IDXGIFactory *fac = NULL;
-+        if (SUCCEEDED(IDXGISwapChain_GetParent(s_chain, &IID_IDXGIFactory, (void **)&fac))) {
-+            IDXGIFactory_MakeWindowAssociation(fac, hwnd, DXGI_MWA_NO_ALT_ENTER);
-+            IDXGIFactory_Release(fac);
-+        }
-+    }
-+    ZeroMemory(&td, sizeof td);
-+    td.Width = width; td.Height = height; td.MipLevels = 1; td.ArraySize = 1;
-+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
-+    td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-+    ZeroMemory(&smp, sizeof smp);
-+    smp.Filter = (f && (f[0] == 'p' || f[0] == 'P')) ? D3D11_FILTER_MIN_MAG_MIP_POINT
-+                                                     : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-+    smp.AddressU = smp.AddressV = smp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-+    smp.MaxLOD = D3D11_FLOAT32_MAX;
-+    vsb = compile("vs", "vs_4_0");
-+    psb = compile("ps", "ps_4_0");
-+    {
-+        ID3DBlob *pgb = compile("psg", "ps_4_0");
-+        D3D11_TEXTURE2D_DESC ld;
-+        ZeroMemory(&ld, sizeof ld);
-+        ld.Width = 256; ld.Height = 1; ld.MipLevels = 1; ld.ArraySize = 1;
-+        ld.Format = DXGI_FORMAT_B8G8R8A8_UNORM; ld.SampleDesc.Count = 1;
-+        ld.Usage = D3D11_USAGE_DEFAULT; ld.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-+        if (!pgb
-+            || FAILED(ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(pgb),
-+                                                     ID3D10Blob_GetBufferSize(pgb), NULL, &s_ps_gamma))
-+            || FAILED(ID3D11Device_CreateTexture2D(s_dev, &ld, NULL, &s_lut))
-+            || FAILED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_lut, NULL, &s_lut_srv))) {
-+            /* no GPU gamma: gpu_present_frame_gamma falls back to the CPU */
-+            if (s_ps_gamma) { ID3D11PixelShader_Release(s_ps_gamma); s_ps_gamma = NULL; }
-+            if (s_lut_srv) { ID3D11ShaderResourceView_Release(s_lut_srv); s_lut_srv = NULL; }
-+            if (s_lut) { ID3D11Texture2D_Release(s_lut); s_lut = NULL; }
-+        }
-+        if (pgb) ID3D10Blob_Release(pgb);
-+    }
-+    if (!vsb || !psb || !make_rtv()
-+        || FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_frame))
-+        || FAILED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_frame, NULL, &s_srv))
-+        || FAILED(ID3D11Device_CreateSamplerState(s_dev, &smp, &s_samp))
-+        || FAILED(ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(vsb),
-+                                                  ID3D10Blob_GetBufferSize(vsb), NULL, &s_vs))
-+        || FAILED(ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(psb),
-+                                                 ID3D10Blob_GetBufferSize(psb), NULL, &s_ps))) {
-+        fprintf(stderr, "  [D3D] present resources failed; staying on GDI\n");
-+        if (vsb) ID3D10Blob_Release(vsb);
-+        if (psb) ID3D10Blob_Release(psb);
-+        gpu_present_shutdown();
-+        return 0;
-+    }
-+    ID3D10Blob_Release(vsb);
-+    ID3D10Blob_Release(psb);
-+    fprintf(stderr, "  [D3D] presenting through D3D11 (%ux%u frame, vsync %s, %s filter)\n",
-+            width, height, s_vsync ? "on" : "off",
-+            smp.Filter == D3D11_FILTER_MIN_MAG_MIP_POINT ? "point" : "linear");
-+    return 1;
-+}
-+
-+/* A frame of another size (the renderer's own, higher-resolution image):
-+ * the texture is recreated at that size first. */
-+static int present_draw(const uint32_t *pixels, int gamma);
-+
-+int gpu_present_frame_size(const uint32_t *pixels, uint32_t width, uint32_t height)
-+{
-+    return gpu_present_frame_gamma(pixels, width, height, 0);
-+}
-+
-+/* gamma: apply the title's ramp (fb_gamma.c) in the shader -- for frames
-+ * the caller has not already put through xbox_FramebufferApplyGamma. The
-+ * pixels are read before this returns. */
-+int gpu_present_frame_gamma(const uint32_t *pixels, uint32_t width, uint32_t height, int gamma)
-+{
-+    if (!s_dev || !width || !height)
-+        return 0;
-+    if (width != s_w || height != s_h) {
-+        D3D11_TEXTURE2D_DESC td;
-+        if (s_srv)   { ID3D11ShaderResourceView_Release(s_srv); s_srv = NULL; }
-+        if (s_frame) { ID3D11Texture2D_Release(s_frame);        s_frame = NULL; }
-+        ZeroMemory(&td, sizeof td);
-+        td.Width = width; td.Height = height; td.MipLevels = 1; td.ArraySize = 1;
-+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
-+        td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-+        if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_frame))
-+            || FAILED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_frame, NULL, &s_srv)))
-+            return 0;
-+        s_w = width; s_h = height;
-+        fprintf(stderr, "  [D3D] frame size now %ux%u\n", width, height);
-+    }
-+    if (gamma && !s_ps_gamma) {
-+        /* no GPU gamma: the CPU pass on a copy (the pixels are the caller's) */
-+        extern void xbox_FramebufferApplyGamma(uint32_t *px, size_t n);
-+        static uint32_t *tmp;
-+        static size_t cap;
-+        size_t n = (size_t)width * height;
-+        if (cap < n) { free(tmp); tmp = (uint32_t *)malloc(n * 4); cap = tmp ? n : 0; }
-+        if (!tmp)
-+            return 0;
-+        memcpy(tmp, pixels, n * 4);
-+        xbox_FramebufferApplyGamma(tmp, n);
-+        return present_draw(tmp, 0);
-+    }
-+    if (gamma) {
-+        extern unsigned xbox_FramebufferGammaSerial(void);
-+        extern unsigned xbox_FramebufferGammaTexels(uint32_t *out256);
-+        if (xbox_FramebufferGammaSerial() != s_lut_serial) {
-+            uint32_t t[256];
-+            s_lut_serial = xbox_FramebufferGammaTexels(t);
-+            ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s_lut, 0, NULL, t, 1024, 0);
-+        }
-+    }
-+    return present_draw(pixels, gamma);
-+}
-+
-+int gpu_present_frame(const uint32_t *pixels)
-+{
-+    return present_draw(pixels, 0);
-+}
-+
-+/* Returns 0 when nothing was shown: the window is occluded or the display
-+ * is off, and Present does not wait for vsync then -- the caller must pace
-+ * itself instead of spinning. */
-+static int present_draw(const uint32_t *pixels, int gamma)
-+{
-+    static const float black[4] = {0, 0, 0, 1};
-+    D3D11_VIEWPORT vp;
-+    uint32_t cw, ch;
-+    float sx, sy;
-+
-+    if (!s_rtv || !pixels)
-+        return 0;
-+    client_size(&cw, &ch);
-+    if (cw != s_bw || ch != s_bh) {
-+        /* The window was resized (or went fullscreen): a back buffer its size. */
-+        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
-+        ID3D11RenderTargetView_Release(s_rtv);
-+        s_rtv = NULL;
-+        if (FAILED(IDXGISwapChain_ResizeBuffers(s_chain, 0, cw, ch, DXGI_FORMAT_UNKNOWN, 0))
-+            || !make_rtv())
-+            return 0;
-+        s_bw = cw; s_bh = ch;
-+    }
-+    ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s_frame, 0, NULL,
-+                                          pixels, s_w * 4, 0);
-+    ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &s_rtv, NULL);
-+    ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_rtv, black);
-+    /* The largest rectangle of the frame's shape that fits, centred. */
-+    sx = (float)s_bw / (float)s_w;
-+    sy = (float)s_bh / (float)s_h;
-+    vp.Width = (float)s_w * (sx < sy ? sx : sy);
-+    vp.Height = (float)s_h * (sx < sy ? sx : sy);
-+    vp.TopLeftX = ((float)s_bw - vp.Width) * 0.5f;
-+    vp.TopLeftY = ((float)s_bh - vp.Height) * 0.5f;
-+    vp.MinDepth = 0; vp.MaxDepth = 1;
-+    ID3D11DeviceContext_RSSetViewports(s_ctx, 1, &vp);
-+    ID3D11DeviceContext_IASetPrimitiveTopology(s_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-+    ID3D11DeviceContext_IASetInputLayout(s_ctx, NULL);
-+    ID3D11DeviceContext_VSSetShader(s_ctx, s_vs, NULL, 0);
-+    ID3D11DeviceContext_PSSetShader(s_ctx, gamma ? s_ps_gamma : s_ps, NULL, 0);
-+    {
-+        ID3D11ShaderResourceView *v[2] = {s_srv, s_lut_srv};
-+        ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, gamma ? 2 : 1, v);
-+    }
-+    ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 1, &s_samp);
-+    ID3D11DeviceContext_Draw(s_ctx, 3, 0);
-+    if (s_capture_pending && InterlockedExchange(&s_capture_pending, 0))
-+        capture_back_buffer();
-+    return IDXGISwapChain_Present(s_chain, (UINT)s_vsync, 0) == S_OK;
-+}
-+
-+void gpu_present_shutdown(void)
-+{
-+    if (s_ps)    { ID3D11PixelShader_Release(s_ps);           s_ps = NULL; }
-+    if (s_ps_gamma) { ID3D11PixelShader_Release(s_ps_gamma);  s_ps_gamma = NULL; }
-+    if (s_lut_srv) { ID3D11ShaderResourceView_Release(s_lut_srv); s_lut_srv = NULL; }
-+    if (s_lut)   { ID3D11Texture2D_Release(s_lut);            s_lut = NULL; }
-+    if (s_vs)    { ID3D11VertexShader_Release(s_vs);          s_vs = NULL; }
-+    if (s_samp)  { ID3D11SamplerState_Release(s_samp);        s_samp = NULL; }
-+    if (s_srv)   { ID3D11ShaderResourceView_Release(s_srv);   s_srv = NULL; }
-+    if (s_frame) { ID3D11Texture2D_Release(s_frame);          s_frame = NULL; }
-+    if (s_rtv)   { ID3D11RenderTargetView_Release(s_rtv);     s_rtv = NULL; }
-+    if (s_chain) { IDXGISwapChain_Release(s_chain);           s_chain = NULL; }
-+    if (s_ctx)   { ID3D11DeviceContext_Release(s_ctx);        s_ctx = NULL; }
-+    if (s_dev)   { ID3D11Device_Release(s_dev);               s_dev = NULL; }
-+}
-+
-+int gpu_present_active(void)
-+{
-+    return s_rtv != NULL;
-+}
-+#endif
-diff --git a/src/video/gpu_present.h b/src/video/gpu_present.h
-new file mode 100644
-index 0000000..8891786
---- /dev/null
-+++ b/src/video/gpu_present.h
-@@ -0,0 +1,17 @@
-+/* D3D11 presentation for the framebuffer window (see gpu_present.c). */
-+#ifndef XBOX_GPU_PRESENT_H
-+#define XBOX_GPU_PRESENT_H
-+#if defined(_WIN32)
-+#include <windows.h>
-+#include <stdint.h>
-+
-+int  gpu_present_enabled(void);                 /* RECOMP_D3D_PRESENT=1 */
-+int  gpu_present_init(HWND hwnd, uint32_t width, uint32_t height);
-+int  gpu_present_frame_gamma(const uint32_t *pixels, uint32_t width, uint32_t height, int gamma); /* gamma: apply the title's ramp on the GPU */
-+int  gpu_present_frame(const uint32_t *pixels); /* width*height B8G8R8A8; 0 = not shown (occluded) */
-+int  gpu_present_frame_size(const uint32_t *pixels, uint32_t width, uint32_t height);
-+int  gpu_present_active(void);
-+void gpu_present_capture(const char *path);   /* next presented image -> BMP */
-+void gpu_present_shutdown(void);
-+#endif
-+#endif
 diff --git a/src/video/video_player.h b/src/video/video_player.h
-index c844aef..bc4d39c 100644
+index c844aef..cf11ad1 100644
 --- a/src/video/video_player.h
 +++ b/src/video/video_player.h
-@@ -62,13 +62,26 @@ int  video_dump_frame_bmp(const char *path);
+@@ -62,6 +62,11 @@ int  video_dump_frame_bmp(const char *path);
   * zero when there is no window, which is the right answer: with nothing to
   * focus there is nothing to type into. */
  int xbox_FramebufferKeyDown(int vk);
@@ -9952,13 +8826,7 @@ index c844aef..bc4d39c 100644
  
  void xbox_FramebufferWindowStart(void);
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
- int  xbox_FramebufferDumpBmp(const char *path);
-+/* What the window shows (a renderer's published frame, gamma and overlay
-+ * included where the presenter allows) as a BMP: the snapshot trigger's
-+ * capture, callable from any thread. Written asynchronously by the window
-+ * thread where the presenter captures its back buffer. */
-+void xbox_FramebufferSnapshot(const char *path);
- /* Title bar: "<XBE title> | FPS: n | draws: n". The name is the certificate's
+@@ -70,5 +75,8 @@ int  xbox_FramebufferDumpBmp(const char *path);
   * UTF-16 title (40 chars max); the stats come from each flip. */
  void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars);
  void xbox_FramebufferWindowFrameStats(uint32_t draws);
