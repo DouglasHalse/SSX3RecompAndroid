@@ -2964,7 +2964,7 @@ index c65ba43..79cb9fb 100644
          old_protect,
          &old_protect
 diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
-index 42135e0..c58870e 100644
+index 42135e0..4b0bf7d 100644
 --- a/src/kernel/kernel_file.c
 +++ b/src/kernel/kernel_file.c
 @@ -18,6 +18,8 @@
@@ -2976,7 +2976,49 @@ index 42135e0..c58870e 100644
  
  #if !defined(_WIN32)
  #include <fcntl.h>
-@@ -805,6 +807,21 @@ static NTSTATUS errno_to_status(int e)
+@@ -792,6 +794,41 @@ static ULONG mode_to_xbox_attrs(mode_t m)
+     return a;
+ }
+ 
++/* Remove the file's parent directory when a delete has left it empty.
++ *
++ * SSX 3 erases a save by marking each file in the save folder delete-on-close
++ * (FileDispositionInformation), never by calling NtDeleteFile on the folder. On
++ * the Xbox the folder goes away with its last file; here the unlink leaves an
++ * empty directory behind, so each erased save would litter UDATA with a stale
++ * folder. rmdir only succeeds on an empty directory, so this is safe to call
++ * after every disposition delete. */
++static void posix_prune_empty_parent(const char* path)
++{
++    char parent[MAX_PATH];
++    const char* slash;
++    DIR* d;
++    struct dirent* de;
++    int empty = 1;
++
++    slash = strrchr(path, '/');
++    if (!slash || slash == path)
++        return;
++    if ((size_t)(slash - path) >= sizeof(parent))
++        return;
++    memcpy(parent, path, (size_t)(slash - path));
++    parent[slash - path] = '\0';
++
++    d = opendir(parent);
++    if (!d)
++        return;
++    while ((de = readdir(d)) != NULL) {
++        if (strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) { empty = 0; break; }
++    }
++    closedir(d);
++    if (empty)
++        rmdir(parent);
++}
++
+ static NTSTATUS errno_to_status(int e)
+ {
+     switch (e) {
+@@ -805,6 +842,62 @@ static NTSTATUS errno_to_status(int e)
      }
  }
  
@@ -2995,10 +3037,58 @@ index 42135e0..c58870e 100644
 + * until its directory handle closes (see the note there). */
 +static void dir_context_release(HANDLE h);
 +
++/* Resolve OBJECT_ATTRIBUTES to a host path.
++ *
++ * NT names may be relative to a directory handle (ObjectAttributes->
++ * RootDirectory). The POSIX backend translated only absolute names, so a title
++ * that opens a file *inside* a folder it already has open -- which is how SSX 3
++ * erases a save, walking the folder handle and deleting each file by bare name
++ * -- asked for "SaveMeta.xbx" in the game root, got FILE_NOT_FOUND, and
++ * reported the delete as failed while the save stayed on disk. The Windows
++ * backend has handled RootDirectory all along (GetFinalPathNameByHandleW), so
++ * this never showed up there. */
++static BOOL xbox_translate_obj_path(PXBOX_OBJECT_ATTRIBUTES oa, char* out, size_t cap)
++{
++    const char* name;
++    const char* root;
++    size_t n, i;
++
++    if (!oa || !out || cap == 0)
++        return FALSE;
++    name = get_xbox_path(oa);
++    if (!name)
++        return FALSE;
++
++    if (oa->RootDirectory && name[0] != '\\' && name[0] != '/') {
++        root = w32_handle_path(oa->RootDirectory);
++        if (root && root[0]) {
++            n = strlen(root);
++            if (n + 1 + strlen(name) + 1 > cap)
++                return FALSE;
++            memcpy(out, root, n);
++            out[n] = '/';
++            for (i = n + 1; *name; name++)
++                out[i++] = (*name == '\\') ? '/' : *name;
++            out[i] = '\0';
++            if (file_trace())
++                fprintf(stderr, "  [FILE-T] rooted name -> '%s'\n", out);
++            return TRUE;
++        }
++    }
++    return xbox_translate_path(name, out, cap);
++}
++
  NTSTATUS __stdcall xbox_NtCreateFile(
      PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
      PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
-@@ -824,7 +841,12 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -818,13 +911,18 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+         return STATUS_INVALID_PARAMETER;
+ 
+     const char* xbox_path = get_xbox_path(ObjectAttributes);
+-    if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH)) {
++    if (!xbox_path || !xbox_translate_obj_path(ObjectAttributes, host_path, MAX_PATH)) {
+         xbox_log(XBOX_LOG_ERROR, XBOX_LOG_FILE, "NtCreateFile: path translation failed");
+         return STATUS_OBJECT_PATH_NOT_FOUND;
      }
  
      int fd;
@@ -3012,7 +3102,7 @@ index 42135e0..c58870e 100644
          if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
              mkdir(host_path, 0755);   /* EEXIST is fine */
          fd = open(host_path, O_RDONLY | O_DIRECTORY);
-@@ -835,6 +857,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -835,6 +933,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      if (fd < 0) {
          int e = errno;
          XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile FAILED: %s (errno=%d)", host_path, e);
@@ -3024,7 +3114,7 @@ index 42135e0..c58870e 100644
          if (IoStatusBlock) {
              IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
              IoStatusBlock->Information = 0;
-@@ -843,6 +870,14 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -843,6 +946,14 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      }
  
      *FileHandle = w32_open_handle(fd, host_path);
@@ -3039,7 +3129,7 @@ index 42135e0..c58870e 100644
      if (IoStatusBlock) {
          IoStatusBlock->Status = STATUS_SUCCESS;
          IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
-@@ -907,11 +942,26 @@ NTSTATUS __stdcall xbox_NtWriteFile(
+@@ -907,11 +1018,26 @@ NTSTATUS __stdcall xbox_NtWriteFile(
  
      ssize_t n = write(fd, Buffer, Length);
      if (n < 0) {
@@ -3066,7 +3156,7 @@ index 42135e0..c58870e 100644
  
      IoStatusBlock->Status = STATUS_SUCCESS;
      IoStatusBlock->Information = (ULONG_PTR)n;
-@@ -923,6 +973,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
+@@ -923,6 +1049,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
  {
      XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
      if (Handle && Handle != INVALID_HANDLE_VALUE) {
@@ -3074,7 +3164,32 @@ index 42135e0..c58870e 100644
          CloseHandle(Handle);
          return STATUS_SUCCESS;
      }
-@@ -953,6 +1004,12 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+@@ -933,11 +1060,21 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
+ {
+     char host_path[MAX_PATH];
+     const char* xbox_path = get_xbox_path(ObjectAttributes);
+-    if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
++    if (!xbox_path || !xbox_translate_obj_path(ObjectAttributes, host_path, MAX_PATH))
+         return STATUS_OBJECT_PATH_NOT_FOUND;
+     XBOX_TRACE(XBOX_LOG_FILE, "NtDeleteFile: %s", host_path);
+-    if (unlink(host_path) == 0) return STATUS_SUCCESS;
+-    if (rmdir(host_path)  == 0) return STATUS_SUCCESS;
++    if (unlink(host_path) == 0) {
++        if (file_trace() && (strstr(host_path, "UDATA") || strstr(host_path, "TDATA")))
++            fprintf(stderr, "  [FILE-T] delete '%s' (file)\n", host_path);
++        return STATUS_SUCCESS;
++    }
++    if (rmdir(host_path) == 0) {
++        if (file_trace() && (strstr(host_path, "UDATA") || strstr(host_path, "TDATA")))
++            fprintf(stderr, "  [FILE-T] delete '%s' (dir)\n", host_path);
++        return STATUS_SUCCESS;
++    }
++    if (file_trace() && (strstr(host_path, "UDATA") || strstr(host_path, "TDATA")))
++        fprintf(stderr, "  [FILE-T] delete '%s' FAILED errno=%d\n", host_path, errno);
+     return STATUS_OBJECT_NAME_NOT_FOUND;
+ }
+ 
+@@ -953,6 +1090,12 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
      if (fd < 0)
          return STATUS_INVALID_HANDLE;
  
@@ -3087,7 +3202,7 @@ index 42135e0..c58870e 100644
      struct stat st;
      if (FileInformationClass != XboxFilePositionInformation) {
          if (fstat(fd, &st) != 0)
-@@ -1023,6 +1080,12 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+@@ -1023,6 +1166,12 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
      if (fd < 0)
          return STATUS_INVALID_HANDLE;
  
@@ -3100,7 +3215,19 @@ index 42135e0..c58870e 100644
      switch (FileInformationClass) {
          case XboxFilePositionInformation: {
              PXBOX_FILE_POSITION_INFORMATION info = (PXBOX_FILE_POSITION_INFORMATION)FileInformation;
-@@ -1079,6 +1142,11 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+@@ -1044,7 +1193,10 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+              * matches NT "delete on close" semantics exactly. */
+             if (info->DeleteFile) {
+                 const char* p = w32_handle_path(FileHandle);
+-                if (p) unlink(p);
++                if (file_trace() && p && (strstr(p, "UDATA") || strstr(p, "TDATA")))
++                    fprintf(stderr, "  [FILE-T] dispose '%s'\n", p);
++                if (p && unlink(p) == 0)
++                    posix_prune_empty_parent(p);
+             }
+             IoStatusBlock->Status = STATUS_SUCCESS;
+             return STATUS_SUCCESS;
+@@ -1079,6 +1231,11 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
              PXBOX_FILE_FS_SIZE_INFORMATION info = (PXBOX_FILE_FS_SIZE_INFORMATION)FsInformation;
              struct statvfs vfs;
              int fd = w32_handle_fd(FileHandle);
@@ -3112,7 +3239,7 @@ index 42135e0..c58870e 100644
              /* Xbox geometry, not the host's -- see the note on
               * XBOX_SECTORS_PER_CLUSTER above. */
              info->BytesPerSector = XBOX_BYTES_PER_SECTOR;
-@@ -1107,7 +1175,13 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+@@ -1107,7 +1264,13 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
  NTSTATUS __stdcall xbox_NtFlushBuffersFile(HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock)
  {
      int fd = w32_handle_fd(FileHandle);
@@ -3127,16 +3254,19 @@ index 42135e0..c58870e 100644
      if (IoStatusBlock) {
          IoStatusBlock->Status = STATUS_SUCCESS;
          IoStatusBlock->Information = 0;
-@@ -1127,6 +1201,8 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+@@ -1125,8 +1288,10 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+     if (!FileInformation)
+         return STATUS_INVALID_PARAMETER;
      const char* xbox_path = get_xbox_path(ObjectAttributes);
-     if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
+-    if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
++    if (!xbox_path || !xbox_translate_obj_path(ObjectAttributes, host_path, MAX_PATH))
          return STATUS_OBJECT_PATH_NOT_FOUND;
 +    if (file_trace() && (strstr(host_path, "UDATA") || strstr(host_path, "TDATA")))
 +        fprintf(stderr, "  [FILE-T] attrs '%s'\n", host_path);
      if (stat(host_path, &st) != 0)
          return STATUS_OBJECT_NAME_NOT_FOUND;
  
-@@ -1148,10 +1224,67 @@ typedef struct {
+@@ -1148,10 +1313,67 @@ typedef struct {
      char   pattern[64];
  } DIR_CONTEXT;
  
@@ -3204,7 +3334,7 @@ index 42135e0..c58870e 100644
  NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
      PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation, ULONG Length,
-@@ -1170,6 +1303,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1170,6 +1392,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      if (!s_dir_cs_init) { InitializeCriticalSection(&s_dir_cs); s_dir_cs_init = TRUE; }
      EnterCriticalSection(&s_dir_cs);
  
@@ -3220,7 +3350,7 @@ index 42135e0..c58870e 100644
      /* Locate or create the per-handle enumeration context. */
      DIR_CONTEXT* ctx = NULL;
      for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
-@@ -1177,12 +1319,19 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1177,12 +1408,19 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      if (!ctx) {
          for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
              if (s_dir_contexts[i].handle == NULL) { ctx = &s_dir_contexts[i]; break; }
@@ -3242,7 +3372,7 @@ index 42135e0..c58870e 100644
          if (ctx->dir) { closedir(ctx->dir); ctx->dir = NULL; }
          const char* dpath = w32_handle_path(FileHandle);
          if (!dpath) { LeaveCriticalSection(&s_dir_cs); return STATUS_UNSUCCESSFUL; }
-@@ -1218,8 +1367,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1218,8 +1456,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
          }
          if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
              continue;
