@@ -21,8 +21,8 @@
  * Names come from the table below; an unknown vtable is reported as "?".
  * RECOMP_GAME_STATE=0 disables it.
  */
-#ifdef _WIN32
 #include "log.h"
+#ifdef _WIN32
 #include <windows.h>
 #else
 #include "platform/win32_compat.h"

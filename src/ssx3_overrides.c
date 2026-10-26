@@ -9,8 +9,8 @@
  * the way recomp_manual.c does: the registers are thread-local, and a plain
  * `extern uint32_t g_eax` names the TLS template, not the running thread's copy.
  */
-#ifdef _WIN32
 #include "log.h"
+#ifdef _WIN32
 #include <windows.h>
 #else
 #include "platform/win32_compat.h"
