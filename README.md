@@ -4,9 +4,8 @@
 
 An **Android port** of [ssx3-recomp](https://github.com/koenhendriks/SSX3-recomp), the static
 recompilation of **SSX 3** (original Xbox, PAL): the game's PowerPC code is recompiled to
-native ARM64 and the Xbox GPU is emulated on Vulkan. **There is no emulator in between** — it
-runs on the phone itself, with on-screen controls, saves written to the device, and no PC in
-the loop once the game data is there.
+native ARM64 and the Xbox GPU is emulated on Vulkan. **There is no emulator in between**: it
+runs on the phone itself, with on-screen controls and saves written to the device.
 
 Upstream targets Windows and Linux and supplies almost everything here: the recompiled code,
 the Vulkan renderer, the launcher, HD textures, widescreen. This fork adds the Android platform
@@ -29,13 +28,13 @@ phone (arm64, Android 11 or newer). Then:
 2. Tap **Select game image (.iso)** and pick **your own** SSX 3 disc image — `.iso` or `.xiso`,
    trimmed or full redump. No game data is included in the APK and none is downloaded: the app
    reads the image, checks it against the PAL disc this port was compiled from, and refuses
-   anything else, saying which disc it actually found.
+   anything else.
 3. It extracts the disc into its own storage (about 2.1 GB, with a progress bar) and **Play**
    appears when that finishes.
 
 The imported game, your saves and the settings live under
 `Android/data/com.douglashalse.ssx3/files/ssx3/`, so uninstalling the app removes them;
-re-importing the same image later keeps your saves, because they are separate files.
+re-importing the same image later keeps your saves.
 
 Releases are signed with the same key every time (the one committed in
 `android/ssx3-debug.keystore`), so a newer APK installs over an older one and keeps the data.
@@ -45,12 +44,12 @@ Releases are signed with the same key every time (the one committed in
 | | |
 |---|---|
 | **An Android build.** | `android/` packages the port with the NDK and **no Gradle**: aapt2, javac, d8, zipalign, apksigner. arm64-v8a, minSdk 30, `libmain.so` + `libSDL2.so`, Vulkan through the phone's own driver. |
-| **It boots on a phone.** | The guest's 4 GB are reserved at a low base, because Android hands out 39-bit user addresses and refuses the fixed mappings a desktop takes for granted; the framebuffer is presented through SDL after SDL_main owns the window and the game runs on its own thread; storage is rooted in the app's own folder, which needs no permission at all (the manifest still asks for all-files access for the adb-pushed development path under `/sdcard/Download`, which the importer replaces); everything the game prints goes to logcat. |
+| **It boots on a phone.** | The guest's 4 GB are reserved at a low base, because Android hands out 39-bit user addresses and refuses the fixed mappings a desktop takes for granted; the framebuffer is presented through SDL after SDL_main owns the window and the game runs on its own thread; storage is rooted in the app's own folder, which needs no permission; everything the game prints goes to logcat. |
 | **On-screen controls.** | An Xbox pad drawn over the frame — floating left stick, D-pad, the ABXY diamond with its letter colours, the shoulder cluster, BACK/START — reported as pad 0 through the same XID report a physical controller uses, so the game reads it exactly like real hardware. The layout, colours and hit rules are [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid)'s gamepad overlay ported line for line (see [Inspiration](#inspiration)), including its rule that the pad **disappears while a real controller is connected**. Its L3/R3 buttons are left out: SSX 3 binds nothing to a stick click. `RECOMP_TOUCH_PAD=0` turns it off; `RECOMP_TOUCH_TRACE=1` logs what each touch hit. |
 | **Saving, loading and deleting on POSIX.** | The toolkit's file layer resolved only absolute names. A title deletes a save by opening each file *through the save folder's handle*, so on Android every delete failed while the files stayed on disk — the Windows backend had handled it from the start. Also: directory scans restart when a pattern is supplied, free their slot on close, and match with a portable glob (`fnmatch(..., FNM_CASEFOLD)` treats `*.*` literally). |
 | **Audio that keeps up.** | Throttle debt drains at a bounded rate instead of one lump after a stall, the audio thread runs at audio priority, the voice lock is taken only when a voice changes: 188 buffers/s (48 kHz), 0 underruns. |
-| **Disc image import** (in progress). | `src/android/xiso.c` reads an XDVDFS image **in place** through the file picker's descriptor — no 2 GB temporary copy — finds the volume descriptor in either the trimmed (`0x10000`) or redump (`0x18300000`) layout, fingerprints `default.xbe` against the PAL disc so a different region is refused *before* extracting 2 GB, and extracts the tree. The extractor is done and tested (`tests/xiso/run.sh`); the launcher screen around it is next, following the installer flow of [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid) (see [Inspiration](#inspiration)). |
-| **Crash reports that name a caller.** | `RECOMP_NO_CRASH_HANDLER=1` hands the fault to the platform's debuggerd, whose tombstone carries a symbolized backtrace. That is how a boot crash in the log pump was traced to the guest CRT's `isatty` shadowing libc's. |
+| **Disc image import.** | `src/android/xiso.c` reads an XDVDFS image **in place** through the file picker's descriptor — no 2 GB temporary copy — finds the volume descriptor in either the trimmed (`0x10000`) or redump (`0x18300000`) layout, fingerprints `default.xbe` against the PAL disc so a different region is refused *before* extracting 2 GB, and extracts the tree. Byte-exact tests in `tests/xiso/run.sh`. |
+| **Crash reports that name a caller.** | `RECOMP_NO_CRASH_HANDLER=1` hands the fault to the platform's debuggerd, whose tombstone carries a symbolized backtrace. |
 
 ## Compatibility
 
@@ -102,9 +101,8 @@ run on a phone with no emulator in between, and three of its decisions are the o
 Their [`docs/android/PORTING.md`](https://github.com/vaduur/LibertyRecompAndroid/blob/main/docs/android/PORTING.md)
 is the best write-up of the platform work in general (installer, file picker, Vulkan driver
 choice, per-thread tuning) and is worth reading even though SSX 3 runs on a different runtime.
-The code here is our own — SSX 3 rides this project's own recompiler and toolkit, so the
-Android layer lives in [DouglasHalse/xboxrecomp](https://github.com/DouglasHalse/xboxrecomp)
-rather than in a ReXGlue fork.
+Its Android layer lives in [DouglasHalse/xboxrecomp](https://github.com/DouglasHalse/xboxrecomp),
+not in a ReXGlue fork.
 
 ## Upstream: the Windows and Linux port
 
@@ -310,9 +308,8 @@ The toolkit is pinned at v0.13.1 (`193e299`), with this project's fixes in
 `scripts/release.sh 0.1.0` builds the APK from the tree you are in, tags `android-v0.1.0` and
 publishes the APK to GitHub Releases with install notes. It refuses a dirty tree, an existing
 tag, or a missing `src/recomp/gen`: the recompiled game code is not in git, so a release is
-built where the disc rip and the regen output are — GitHub Actions cannot build this APK, and
-does not pretend to (`--dry-run` builds and prints what would be published, without touching
-GitHub).
+built where the disc rip and the regen output are; GitHub Actions cannot build it
+(`--dry-run` builds and prints what would be published, without touching GitHub).
 
 The APK carries its version in the manifest (`versionName`, and `versionCode` from the commit
 count so it always increases), in a generated `BuildInfo` class the launcher prints, and in the
