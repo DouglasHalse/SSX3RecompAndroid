@@ -37,7 +37,6 @@ public class LauncherActivity extends Activity {
 
     private static final int PICK_IMAGE = 1;
 
-    /** Where a player finds the source, the releases and the issue tracker. */
     private static final String REPO_URL = "https://github.com/DouglasHalse/SSX3RecompAndroid";
 
     private TextView status;     // one line: ready or not
@@ -145,9 +144,7 @@ public class LauncherActivity extends Activity {
         title.setTextColor(0xFFEAF2FF);
         root.addView(title);
 
-        /* The fork, one tap away: a player who wants the source, the release
-         * history or to report what broke needs to find it without guessing a
-         * URL. */
+
         TextView sub = new TextView(this);
         sub.setText(REPO_URL.replace("https://", ""));
         sub.setTextSize(14);
@@ -166,9 +163,7 @@ public class LauncherActivity extends Activity {
         });
         root.addView(sub);
 
-        /* What this APK is: a release says which one, anything else says the
-         * commit it came from -- the only useful identifier for a build that
-         * is not a release. Stamped in by android/build_apk.sh. */
+        /* Stamped in by android/build_apk.sh. */
         TextView build = new TextView(this);
         String toolkit = BuildInfo.TOOLKIT.isEmpty()
                 ? "" : " + toolkit " + BuildInfo.TOOLKIT;
