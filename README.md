@@ -15,35 +15,10 @@ layer and what a phone needs. The toolkit side of it lives in
 
 ## Made with AI
 
-**Every line of this fork's own work — the Android support — was written by an AI agent.** The
-platform layer, the on-screen controls, the disc-image extractor, the POSIX file fixes, the audio
-changes, the build scripts and the fork sections of this README were produced by
-**Hermes Agent** (Nous Research) driving a large language model from DeepSeek, in agent sessions
-through October 2026. A human set the goals, supplied the disc rip, ran the port on a real
-phone, reported symptoms ("I'm unable to delete the saves", "I want the same on-screen controls
-the GTA IV port has") and judged every result. Nothing here was typed by hand.
-
-That is worth stating plainly, because it changes what you should expect:
-
-- **The human is the oracle, not the coder.** Every "it works" in this README was checked by
-  running something: on a Galaxy S24, and in the x86-64 emulator where only logic matters
-  (input, extraction). Where a claim is inference rather than measurement it says so — the
-  expected-to-work GPUs, for instance, follow from the renderer's Vulkan requirements and were
-  not tested on those devices.
-- **Expect rough edges.** AI-written code arrives fast and reads plausibly; that is not the same
-  as battle-tested. This port has been exercised for days, not years.
-- **The debugging still had to be real.** Every bug fixed here was fixed against evidence: a
-  symbolized tombstone that named a guest function shadowing libc's `isatty`, a file trace
-  showing a delete opened against the wrong root, an audio counter reading 188 buffers/s. When
-  the cause was not understood, the next step was another measurement, never a guess.
-
-**What is not AI work:** the recompiled game code, the Vulkan renderer, the launcher, HD texture
-support and the entire Windows/Linux port come from
-[koenhendriks/SSX3-recomp](https://github.com/koenhendriks/SSX3-recomp) and the
-[xboxrecomp](https://github.com/sp00nznet/xboxrecomp) toolkit, and are the work of their human
-authors. This fork adds a platform layer on top of that, and the toolkit fork
-([DouglasHalse/xboxrecomp](https://github.com/DouglasHalse/xboxrecomp)) carries the same AI
-provenance for its Android-related changes.
+This project is **heavily AI-assisted**. The Android work here was written by an AI agent
+from goals, reports and verification by a human running the port on a real phone. Upstream's
+code, the game recompilation and the renderer, is not: see
+[koenhendriks/SSX3-recomp](https://github.com/koenhendriks/SSX3-recomp).
 
 ## What this fork adds
 
