@@ -580,7 +580,8 @@ static void play(void)
             snprintf(cwd, sizeof cwd, "%s/..", s_dir);
     }
 
-    if (!isatty(STDERR_FILENO)) {
+    /* tcgetpgrp, not isatty: the guest CRT defines isatty (see log.c). */
+    if (tcgetpgrp(STDERR_FILENO) == -1) {
         char logs[PATH_MAX], path[PATH_MAX + 64];
         time_t t = time(NULL);
         struct tm tm;

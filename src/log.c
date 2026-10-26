@@ -565,7 +565,12 @@ int log_pump_start(void)
     {
         int p[2], dupfd;
         pthread_t th;
-        if (isatty(2))
+        /* Not isatty(): the generated guest code defines the Xbox CRT's
+         * isatty (0x0021A60D) as a global symbol, which shadows libc's inside
+         * this library -- calling it ran Xbox bytecode, from the log thread,
+         * and faulted. tcgetpgrp answers the same question and nothing in the
+         * guest image is called that. */
+        if (tcgetpgrp(2) != -1)
             return 0;                   /* a terminal: everything, as it comes */
         if ((dupfd = dup(2)) < 0)
             return 0;
