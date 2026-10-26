@@ -25,8 +25,7 @@ code, the game recompilation and the renderer, is not: see
 Download `ssx3-android-<version>.apk` from the [Releases](../../releases) tab and open it on the
 phone (arm64, Android 11 or newer). Then:
 
-1. Open **SSX 3**. The launcher says which build it is: a release says `Version 0.1.0`, any
-   other build says `Build <commit> · <date>`.
+1. Open **SSX 3**.
 2. Tap **Select game image (.iso)** and pick **your own** SSX 3 disc image — `.iso` or `.xiso`,
    trimmed or full redump. No game data is included in the APK and none is downloaded: the app
    reads the image, checks it against the PAL disc this port was compiled from, and refuses
@@ -47,7 +46,7 @@ Releases are signed with the same key every time (the one committed in
 |---|---|
 | **An Android build.** | `android/` packages the port with the NDK and **no Gradle**: aapt2, javac, d8, zipalign, apksigner. arm64-v8a, minSdk 30, `libmain.so` + `libSDL2.so`, Vulkan through the phone's own driver. |
 | **It boots on a phone.** | The guest's 4 GB are reserved at a low base, because Android hands out 39-bit user addresses and refuses the fixed mappings a desktop takes for granted; the framebuffer is presented through SDL after SDL_main owns the window and the game runs on its own thread; storage is rooted in the app's own folder, which needs no permission at all (the manifest still asks for all-files access for the adb-pushed development path under `/sdcard/Download`, which the importer replaces); everything the game prints goes to logcat. |
-| **On-screen controls.** | An Xbox pad drawn over the frame — floating left stick, D-pad, the ABXY diamond with its letter colours, the shoulder cluster, BACK/START — reported as pad 0 through the same XID report a physical controller uses, so the game reads it exactly like real hardware. The layout, colours and hit rules are [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid)'s gamepad overlay ported line for line (see [Inspiration](#inspiration)), including its rule that the pad **disappears while a real controller is connected** and returns when it goes. Its L3/R3 buttons are left out: nothing in SSX 3 binds a stick click, so they would be dead circles over the picture. `RECOMP_TOUCH_PAD=0` turns it off; `RECOMP_TOUCH_TRACE=1` logs what each touch hit. |
+| **On-screen controls.** | An Xbox pad drawn over the frame — floating left stick, D-pad, the ABXY diamond with its letter colours, the shoulder cluster, BACK/START — reported as pad 0 through the same XID report a physical controller uses, so the game reads it exactly like real hardware. The layout, colours and hit rules are [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid)'s gamepad overlay ported line for line (see [Inspiration](#inspiration)), including its rule that the pad **disappears while a real controller is connected**. Its L3/R3 buttons are left out: SSX 3 binds nothing to a stick click. `RECOMP_TOUCH_PAD=0` turns it off; `RECOMP_TOUCH_TRACE=1` logs what each touch hit. |
 | **Saving, loading and deleting on POSIX.** | The toolkit's file layer resolved only absolute names. A title deletes a save by opening each file *through the save folder's handle*, so on Android every delete failed while the files stayed on disk — the Windows backend had handled it from the start. Also: directory scans restart when a pattern is supplied, free their slot on close, and match with a portable glob (`fnmatch(..., FNM_CASEFOLD)` treats `*.*` literally). |
 | **Audio that keeps up.** | Throttle debt drains at a bounded rate instead of one lump after a stall, the audio thread runs at audio priority, the voice lock is taken only when a voice changes: 188 buffers/s (48 kHz), 0 underruns. |
 | **Disc image import** (in progress). | `src/android/xiso.c` reads an XDVDFS image **in place** through the file picker's descriptor — no 2 GB temporary copy — finds the volume descriptor in either the trimmed (`0x10000`) or redump (`0x18300000`) layout, fingerprints `default.xbe` against the PAL disc so a different region is refused *before* extracting 2 GB, and extracts the tree. The extractor is done and tested (`tests/xiso/run.sh`); the launcher screen around it is next, following the installer flow of [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid) (see [Inspiration](#inspiration)). |
@@ -315,10 +314,9 @@ built where the disc rip and the regen output are — GitHub Actions cannot buil
 does not pretend to (`--dry-run` builds and prints what would be published, without touching
 GitHub).
 
-The APK is stamped with what it came from in three places that agree: the manifest
-(`versionName`, and `versionCode` from the commit count, so it always increases), a generated
-`BuildInfo` class that the launcher prints, and the release notes. A release build says
-`Version 0.1.0`; every other build says `Build <short commit> · <date>`.
+The APK carries its version in the manifest (`versionName`, and `versionCode` from the commit
+count so it always increases), in a generated `BuildInfo` class the launcher prints, and in the
+release notes.
 
 ## Testing
 
