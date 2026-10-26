@@ -31,6 +31,16 @@
         android:theme="@style/AppTheme"
         android:hardwareAccelerated="true">
 
+        <activity android:name="com.douglashalse.ssx3.LauncherActivity"
+            android:label="@string/app_name"
+            android:screenOrientation="sensorLandscape"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <activity android:name="org.libsdl.app.SDLActivity"
             android:label="@string/app_name"
             android:alwaysRetainTaskState="true"
@@ -39,10 +49,6 @@
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:preferMinimalPostProcessing="true"
             android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>

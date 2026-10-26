@@ -20,7 +20,9 @@ APK_NAME=${APK_NAME:-ssx3-debug.apk}
 PKG=com.douglashalse.ssx3
 
 NATIVE=${NATIVE:-build-android/libmain.so}
+IMPORT=${IMPORT:-build-android/libssx3import.so}
 [ -f "$NATIVE" ] || { echo "missing $NATIVE: run the NDK build first" >&2; exit 1; }
+[ -f "$IMPORT" ] || { echo "missing $IMPORT: run the NDK build first" >&2; exit 1; }
 [ -f "$SDL_LIB" ] || { echo "missing $SDL_LIB" >&2; exit 1; }
 
 rm -rf "$OUT"
@@ -54,17 +56,21 @@ OUT_ABS=$(cd "$OUT" && pwd -W)   # C:/... : d8 rejects MSYS /c/... paths
 
 echo "== package"
 cp "$NATIVE"  "$OUT/lib/$ABI/libmain.so"
+cp "$IMPORT"  "$OUT/lib/$ABI/libssx3import.so"
 cp "$SDL_LIB" "$OUT/lib/$ABI/libSDL2.so"
 STRIP=${STRIP:-C:/Android/android-ndk-r27c/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip.exe}
 [ -x "$STRIP" ] && "$STRIP" --strip-unneeded "$OUT/lib/$ABI/libmain.so" \
+                          "$OUT/lib/$ABI/libssx3import.so" \
                           "$OUT/lib/$ABI/libSDL2.so"
 python - "$OUT/base.apk" "$OUT/dex/classes.dex" \
-    "$OUT/lib/$ABI/libmain.so" "$OUT/lib/$ABI/libSDL2.so" "$ABI" <<'PY'
+    "$OUT/lib/$ABI/libmain.so" "$OUT/lib/$ABI/libssx3import.so" \
+    "$OUT/lib/$ABI/libSDL2.so" "$ABI" <<'PY'
 import sys, zipfile
-apk, dex, libmain, libsdl, abi = sys.argv[1:6]
+apk, dex, libmain, libimport, libsdl, abi = sys.argv[1:7]
 with zipfile.ZipFile(apk, "a", zipfile.ZIP_DEFLATED) as z:
     z.write(dex, "classes.dex")
     z.write(libmain, "lib/%s/libmain.so" % abi)
+    z.write(libimport, "lib/%s/libssx3import.so" % abi)
     z.write(libsdl, "lib/%s/libSDL2.so" % abi)
 PY
 

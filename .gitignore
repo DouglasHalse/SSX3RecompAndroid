@@ -96,3 +96,10 @@ build-web/
 # Android builds
 build-android/
 build-android-x64/
+
+# Runtime junk: the game writes its partition images into the working tree,
+# and screenshots/input scripts land at the root while testing on device.
+system/
+pad.cfg
+pad.txt
+/*.png

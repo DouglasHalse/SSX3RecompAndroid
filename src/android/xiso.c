@@ -336,24 +336,30 @@ int xiso_probe(int fd, xiso_info *info, char *msg, size_t msg_cap)
 
 /* ---- extract -------------------------------------------------------- */
 
+/* Create a folder and whatever is missing above it.
+ *
+ * Deliberately not a walk from "/": Android denies even stat() on the parts of
+ * that path that belong to the platform (/storage/emulated/0/Android is not the
+ * app's), so a top-down walk fails on a path it should never have touched.
+ * mkdir() the whole thing first and only recurse when the answer is ENOENT --
+ * every existing component then answers EEXIST and is left alone. */
 static int mkdir_p(const char *path)
 {
-    char tmp[1024];
-    size_t i, len;
+    char parent[1024];
+    char *slash;
 
-    snprintf(tmp, sizeof tmp, "%s", path);
-    len = strlen(tmp);
-    for (i = 1; i < len; i++) {
-        if (tmp[i] == '/') {
-            tmp[i] = '\0';
-            if (mkdir(tmp, 0775) != 0 && errno != EEXIST)
-                return -1;
-            tmp[i] = '/';
-        }
-    }
-    if (mkdir(tmp, 0775) != 0 && errno != EEXIST)
+    if (mkdir(path, 0775) == 0 || errno == EEXIST)
+        return 0;
+    if (errno != ENOENT)
+        return -1;              /* permission, read-only, too long: real */
+    snprintf(parent, sizeof parent, "%s", path);
+    slash = strrchr(parent, '/');
+    if (!slash || slash == parent)
         return -1;
-    return 0;
+    *slash = '\0';
+    if (mkdir_p(parent) != 0)
+        return -1;
+    return (mkdir(path, 0775) == 0 || errno == EEXIST) ? 0 : -1;
 }
 
 typedef struct {
@@ -376,15 +382,21 @@ static int extract_entry(xiso_ctx *c, const char *path, const char *name,
     snprintf(dest, sizeof dest, "%s/%s", dest_root, path);
     if (is_dir) {
         extract_state sub;
-        if (mkdir_p(dest) != 0)
-            return fail(c, "cannot create folder", dest);
+        if (mkdir_p(dest) != 0) {
+            char why[512];
+            snprintf(why, sizeof why, "%s (%s)", dest, strerror(errno));
+            return fail(c, "cannot create folder", why);
+        }
         sub.dest = st->dest;
         sub.depth = st->depth + 1;
         return walk_dir(c, start, size, path, extract_entry, &sub, sub.depth);
     }
 
-    if (mkdir_p(dest_root) != 0)
-        return fail(c, "cannot create the game folder", dest_root);
+    if (mkdir_p(dest_root) != 0) {
+        char why[512];
+        snprintf(why, sizeof why, "%s (%s)", dest_root, strerror(errno));
+        return fail(c, "cannot create the game folder", why);
+    }
     {
         /* create the file's folder */
         char dir[2048];
@@ -393,8 +405,11 @@ static int extract_entry(xiso_ctx *c, const char *path, const char *name,
         slash = strrchr(dir, '/');
         if (slash) {
             *slash = '\0';
-            if (mkdir_p(dir) != 0)
-                return fail(c, "cannot create folder", dir);
+            if (mkdir_p(dir) != 0) {
+                char why[512];
+                snprintf(why, sizeof why, "%s (%s)", dir, strerror(errno));
+                return fail(c, "cannot create folder", why);
+            }
         }
     }
 
@@ -420,7 +435,11 @@ static int extract_entry(xiso_ctx *c, const char *path, const char *name,
         if (write_all(out, buf, n) != 0) {
             free(buf);
             close(out);
-            return fail(c, "write failed (storage full?)", dest);
+            {
+            char why[512];
+            snprintf(why, sizeof why, "%s (%s)", dest, strerror(errno));
+            return fail(c, "write failed", why);
+        }
         }
         off += n;
         left -= n;
@@ -472,8 +491,11 @@ int xiso_extract(int fd, const char *dest_dir, xiso_progress_fn progress,
 
     if (progress)
         progress(user, "", 0, c.total);
-    if (mkdir_p(dest_dir) != 0)
-        return fail(&c, "cannot create the game folder", dest_dir);
+    if (mkdir_p(dest_dir) != 0) {
+        char why[512];
+        snprintf(why, sizeof why, "%s (%s)", dest_dir, strerror(errno));
+        return fail(&c, "cannot create the game folder", why);
+    }
     xs.dest = dest_dir;
     xs.depth = 0;
     return walk_dir(&c, root_sector, root_size, "", extract_entry, &xs, 0);

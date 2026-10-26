@@ -99,6 +99,14 @@ elseif(ANDROID)
     set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "main")
     set_source_files_properties(src/main.c PROPERTIES COMPILE_DEFINITIONS "main=ssx3_main")
     set_source_files_properties(src/android/sdl_main.c PROPERTIES COMPILE_DEFINITIONS "")
+
+    # The launcher's importer, as its own small library so the screen that asks
+    # for a disc image does not have to load the game to work: libssx3import.so
+    # is xiso.c (XDVDFS reader/extractor) behind a JNI wrapper.
+    add_library(ssx3import SHARED src/android/xiso.c src/android/xiso_jni.c)
+    target_include_directories(ssx3import PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/android)
+    set_target_properties(ssx3import PROPERTIES OUTPUT_NAME "ssx3import")
+    target_link_libraries(ssx3import PRIVATE m log)
 else()
     add_executable(${PROJECT_NAME} ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
 endif()
