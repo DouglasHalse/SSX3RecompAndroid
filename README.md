@@ -1,13 +1,67 @@
-# ssx3-recomp
+# SSX3RecompAndroid
 
 [![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/434-ssx-3/)
 
-Static recompilation of **SSX 3** (original Xbox, PAL) into a native program
-for **Windows and Linux**, built with
-[xboxrecomp](https://github.com/sp00nznet/xboxrecomp). The game's own code
-runs as native code, and the Xbox GPU is emulated on Vulkan. It plays at
-**60 FPS**, at your monitor's resolution, in **true widescreen** (16:9, 21:9
-or 32:9).
+An **Android port** of [ssx3-recomp](https://github.com/koenhendriks/SSX3-recomp), the static
+recompilation of **SSX 3** (original Xbox, PAL): the game's PowerPC code is recompiled to
+native ARM64 and the Xbox GPU is emulated on Vulkan. **There is no emulator in between** — it
+runs on the phone itself, with on-screen controls, saves written to the device, and no PC in
+the loop once the game data is there.
+
+Upstream targets Windows and Linux and supplies almost everything here: the recompiled code,
+the Vulkan renderer, the launcher, HD textures, widescreen. This fork adds the Android platform
+layer and what a phone needs. The toolkit side of it lives in
+[DouglasHalse/xboxrecomp](https://github.com/DouglasHalse/xboxrecomp) (branch `android-port`).
+
+## What this fork adds
+
+| | |
+|---|---|
+| **An Android build.** | `android/` packages the port with the NDK and **no Gradle**: aapt2, javac, d8, zipalign, apksigner. arm64-v8a, minSdk 30, `libmain.so` + `libSDL2.so`, Vulkan through the phone's own driver. |
+| **It boots on a phone.** | The guest's 4 GB are reserved at a low base, because Android hands out 39-bit user addresses and refuses the fixed mappings a desktop takes for granted; the framebuffer is presented through SDL after SDL_main owns the window and the game runs on its own thread; storage is rooted in the app's own folder, which needs no permission at all (the manifest still asks for all-files access for the adb-pushed development path under `/sdcard/Download`, which the importer replaces); everything the game prints goes to logcat. |
+| **On-screen controls.** | A pad drawn over the frame — left analog stick, D-pad, the Xbox ABXY diamond, the shoulder cluster, BACK/START — reported as pad 0 through the same XID report a physical controller uses, so the game reads it exactly like real hardware. `RECOMP_TOUCH_PAD=0` hides it; `RECOMP_TOUCH_TRACE=1` shows what a touch hit. |
+| **Saving, loading and deleting on POSIX.** | The toolkit's file layer resolved only absolute names. A title deletes a save by opening each file *through the save folder's handle*, so on Android every delete failed while the files stayed on disk — the Windows backend had handled it from the start. Also: directory scans restart when a pattern is supplied, free their slot on close, and match with a portable glob (`fnmatch(..., FNM_CASEFOLD)` treats `*.*` literally). |
+| **Audio that keeps up.** | Throttle debt drains at a bounded rate instead of one lump after a stall, the audio thread runs at audio priority, the voice lock is taken only when a voice changes: 188 buffers/s (48 kHz), 0 underruns. |
+| **Disc image import** (in progress). | `src/android/xiso.c` reads an XDVDFS image **in place** through the file picker's descriptor — no 2 GB temporary copy — finds the volume descriptor in either the trimmed (`0x10000`) or redump (`0x18300000`) layout, fingerprints `default.xbe` against the PAL disc so a different region is refused *before* extracting 2 GB, and extracts the tree. The extractor is done and tested (`tests/xiso/run.sh`); the launcher screen around it is next. |
+| **Crash reports that name a caller.** | `RECOMP_NO_CRASH_HANDLER=1` hands the fault to the platform's debuggerd, whose tombstone carries a symbolized backtrace. That is how a boot crash in the log pump was traced to the guest CRT's `isatty` shadowing libc's. |
+
+## Compatibility
+
+**Verified** on this device:
+
+| Device | GPU | Vulkan | What was checked |
+|---|---|---|---|
+| Samsung Galaxy S24 (SM-S921B), Android 16, arm64 | Samsung Xclipse 940 (AMD RDNA 3 based) | 1.3 | Boot, menus, races, save, load, in-game delete, audio at 48 kHz, on-screen controls |
+| Android emulator, x86-64 | SwiftShader (software Vulkan) | 1.3 | Used to test logic and input; far too slow to play |
+
+**Expected to work** (not tested here): any arm64 device with **Vulkan 1.3** and
+`VK_KHR_push_descriptor`, on Android 11 or newer —
+
+- Snapdragon 8 Gen 1 / 2 / 3 (Adreno 730 / 740 / 750)
+- Snapdragon 888 / 870 (Adreno 660 / 650)
+- Exynos 2200 / 2400 and Tensor G3 / G4 (Xclipse, Mali-G715 / G730)
+- Dimensity 9200 / 9300 (Immortalis-G715 / G720)
+
+Mali parts that lack BC (DXT) texture compression are expected to run: the renderer asks
+the driver and decodes those textures in software when it cannot, so expect slower frames rather
+than a refusal.
+
+**Not expected to work:**
+
+- **Vulkan 1.2 or older** (older midrange Adreno and Mali parts): the renderer needs dynamic
+  rendering, `synchronization2` and push descriptors from Vulkan 1.3.
+- **32-bit-only devices**: the APK ships `arm64-v8a` only.
+- **Windows and Linux**: nothing here improves on upstream — use
+  [koenhendriks/SSX3-recomp](https://github.com/koenhendriks/SSX3-recomp) for those.
+
+**You need:** Android 11 (API 30) or newer, arm64-v8a, about 2.5 GB free for the game data,
+and your own rip of the **PAL** disc. A USA or Japanese disc is refused: the recompiled code is
+the PAL build, and the two are different code at the same addresses.
+
+## Upstream: the Windows and Linux port
+
+The rest of this README is upstream's. It describes the Windows and Linux port this fork is
+built on, including the parts that already work on Android unchanged.
 
 | Platform | Status |
 |---|---|
