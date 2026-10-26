@@ -37,6 +37,9 @@ public class LauncherActivity extends Activity {
 
     private static final int PICK_IMAGE = 1;
 
+    /** Where a player finds the source, the releases and the issue tracker. */
+    private static final String REPO_URL = "https://github.com/DouglasHalse/SSX3RecompAndroid";
+
     private TextView status;     // one line: ready or not
     private TextView detail;     // what was found / what went wrong
     private ProgressBar bar;
@@ -136,15 +139,31 @@ public class LauncherActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView title = new TextView(this);
-        title.setText("SSX 3");
-        title.setTextSize(34);
+        title.setText("SSX3RecompAndroid");
+        title.setTextSize(24);
+        title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
         title.setTextColor(0xFFEAF2FF);
         root.addView(title);
 
+        /* The fork, one tap away: a player who wants the source, the release
+         * history or to report what broke needs to find it without guessing a
+         * URL. */
         TextView sub = new TextView(this);
-        sub.setText("Xbox recompiled to native ARM, running on this phone");
+        sub.setText(REPO_URL.replace("https://", ""));
         sub.setTextSize(14);
-        sub.setTextColor(0xFF8FA3B8);
+        sub.setTextColor(0xFF6FB3FF);
+        sub.setPaintFlags(sub.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
+        sub.setPadding(0, pad / 8, 0, 0);
+        sub.setOnClickListener(new android.view.View.OnClickListener() {
+            @Override
+            public void onClick(android.view.View v) {
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(REPO_URL)));
+                } catch (Exception e) {
+                    status.setText("No browser to open " + REPO_URL);
+                }
+            }
+        });
         root.addView(sub);
 
         /* What this APK is: a release says which one, anything else says the
