@@ -87,7 +87,10 @@ git tag -a "$TAG" -m "SSX 3 Android $VERSION" "$COMMIT"
 git push "$REMOTE" "$TAG"
 
 if [ -z "$NOTES" ]; then
-    NOTES=$(mktemp)
+    # A native gh.exe cannot read an MSYS /tmp path, so the generated notes
+    # file lives in the build tree, beside the APK it describes.
+    NOTES="$ROOT/build/release/RELEASE_NOTES_$VERSION.md"
+    mkdir -p "$(dirname "$NOTES")"
     cat > "$NOTES" <<RELEASE
 SSX 3, statically recompiled to native ARM, running on Android.
 
