@@ -306,7 +306,9 @@ The toolkit is pinned at v0.13.1 (`193e299`), with this project's fixes in
 ### Cutting a release
 
 `scripts/release.sh 0.1.0` builds the APK from the tree you are in, tags `android-v0.1.0` and
-publishes the APK to GitHub Releases with install notes. It refuses a dirty tree, an existing
+publishes the APK to GitHub Releases. The release body is generated from git: what changed in
+this repository and in the toolkit since the previous tag, then the install steps and the build
+stamp. It refuses a dirty tree, an existing
 tag, or a missing `src/recomp/gen`: the recompiled game code is not in git, so a release is
 built where the disc rip and the regen output are; GitHub Actions cannot build it
 (`--dry-run` builds and prints what would be published, without touching GitHub).

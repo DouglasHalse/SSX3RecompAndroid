@@ -5,9 +5,8 @@
 #   scripts/release.sh 0.1.0 --notes notes.md
 #   scripts/release.sh 0.1.0 --dry-run        # build + print, publish nothing
 #
-# The APK lands in GitHub's Releases tab, so a player downloads one file and
-# never sees a build tool: install it, tap Select game image, pick their own
-# disc image, play.
+# The release body is a changelog of both repositories since the previous tag,
+# an install note, and the build stamp; scripts/release_notes.sh writes it.
 #
 # The recompiled game code (src/recomp/gen, 77 files) is not in git, so this
 # cannot run in CI: the release is built here, where the disc rip and the regen
@@ -58,6 +57,20 @@ COMMIT=$(git rev-parse --short HEAD)
 TOOLKIT_COMMIT=$( (cd "$ROOT/../xboxrecomp" && git rev-parse --short HEAD) 2>/dev/null || echo unknown )
 VERSION_CODE=$(git rev-list --count HEAD)
 
+# The changelog reads from the previous release: this repo since its tag, the
+# toolkit since the commit that release was built with. The tag annotation
+# carries that commit; tags cut before it did not, so their release body does.
+BASE_TAG=$(git describe --tags --abbrev=0 --match 'android-v*' HEAD 2>/dev/null || true)
+BASE_TOOLKIT=""
+if [ -n "$BASE_TAG" ]; then
+    BASE_TOOLKIT=$(git tag -l --format='%(contents)' "$BASE_TAG" \
+        | sed -n 's/.*toolkit \([0-9a-f]\{7,40\}\).*/\1/p' | head -1)
+    if [ -z "$BASE_TOOLKIT" ]; then
+        BASE_TOOLKIT=$(gh release view "$BASE_TAG" --repo "$REPO" --json body -q .body 2>/dev/null \
+            | sed -n 's/.*toolkit \([0-9a-f]\{7,40\}\).*/\1/p' | head -1)
+    fi
+fi
+
 say "building the APK for $TAG (commit $COMMIT, version code $VERSION_CODE)"
 cmake --build build-android --target ssx3_recomp ssx3import --parallel 16 >/dev/null
 RELEASE=1 VERSION_NAME="$VERSION" VERSION_CODE="$VERSION_CODE" COMMIT="$COMMIT" \
@@ -76,6 +89,8 @@ if [ -n "$NOTES" ]; then
 fi
 
 if [ "$DRY" = "1" ]; then
+    say "changes since ${BASE_TAG:-the first release} (toolkit ${BASE_TOOLKIT:-none})"
+    bash scripts/changelog.sh "$BASE_TAG" "$BASE_TOOLKIT" "$COMMIT" "$TOOLKIT_COMMIT"
     echo
     echo "dry run: not tagging, not publishing. Would create $TAG on $COMMIT"
     echo "and upload $APK to $REPO."
@@ -84,34 +99,16 @@ fi
 
 # ---- tag, publish ---------------------------------------------------------
 say "tagging $TAG"
-git tag -a "$TAG" -m "SSX 3 Android $VERSION" "$COMMIT"
+git tag -a "$TAG" -m "SSX 3 Android $VERSION (toolkit $TOOLKIT_COMMIT)" "$COMMIT"
 git push "$REMOTE" "$TAG"
 
 if [ -z "$NOTES" ]; then
     # A native gh.exe cannot read an MSYS /tmp path, so the generated notes
     # file lives in the build tree, beside the APK it describes.
-    NOTES="build/release/RELEASE_NOTES_$VERSION.md"   # relative: gh.exe is native
+    NOTES="build/release/RELEASE_NOTES_$VERSION.md"
     mkdir -p "$(dirname "$NOTES")"
-    cat > "$NOTES" <<RELEASE
-SSX 3, statically recompiled to native ARM, running on Android.
-
-**Install:** download \`ssx3-android-$VERSION.apk\` below and open it on the phone
-(Android 11 or newer, arm64). Your phone will ask to allow installing from this
-app the first time.
-
-**Then:** open the app, tap **Select game image (.iso)**, and pick your own
-SSX 3 disc image. The app checks that the image is the PAL disc this port was
-built from, extracts it into its own storage with a progress bar (about 2.1 GB),
-and **Play** appears when it is done. No game data is included here, and none is
-downloaded.
-
-**What is in this build:** everything in the readme — the first-run importer,
-the on-screen pad laid out like the GTA IV Android port's (which hides itself
-while a real controller is connected), saves, and the touch controls.
-
-Built from commit $COMMIT (version code $VERSION_CODE), toolkit $TOOLKIT_COMMIT.
-sha256 \`$SHA\`
-RELEASE
+    bash scripts/release_notes.sh "$VERSION" "$COMMIT" "$VERSION_CODE" \
+        "$TOOLKIT_COMMIT" "$SHA" "$BASE_TAG" "$BASE_TOOLKIT" > "$NOTES"
 fi
 
 say "publishing to $REPO"
