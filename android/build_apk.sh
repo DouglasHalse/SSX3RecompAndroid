@@ -25,6 +25,10 @@ PKG=com.douglashalse.ssx3
 # carries the commit, because that is what identifies a tree that is not a
 # release.
 COMMIT=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}
+# This APK is built from two repositories -- this one and the toolkit branch
+# that supplies the runtime, the renderer and the touch pad -- so it names both.
+TOOLKIT_DIR=${TOOLKIT_DIR:-$(cd "$ROOT/.." && pwd)/xboxrecomp}
+TOOLKIT_COMMIT=${TOOLKIT_COMMIT:-$( (cd "$TOOLKIT_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null) || true )}
 BUILD_DATE=${BUILD_DATE:-$(date +%Y-%m-%d)}
 VERSION_CODE=${VERSION_CODE:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}
 RELEASE=${RELEASE:-0}
@@ -49,7 +53,7 @@ IMPORT=${IMPORT:-build-android/libssx3import.so}
 rm -rf "$OUT"
 mkdir -p "$OUT/res" "$OUT/gen" "$OUT/classes" "$OUT/dex" "$OUT/lib/$ABI"
 
-echo "== build info ($VERSION_NAME, commit $COMMIT, code $VERSION_CODE)"
+echo "== build info ($VERSION_NAME, commit $COMMIT + toolkit $TOOLKIT_COMMIT, code $VERSION_CODE)"
 mkdir -p "$OUT/gen/com/douglashalse/ssx3"
 cat > "$OUT/gen/com/douglashalse/ssx3/BuildInfo.java" <<JAVA
 package com.douglashalse.ssx3;
@@ -58,6 +62,7 @@ package com.douglashalse.ssx3;
 public final class BuildInfo {
     public static final String  VERSION = "$VERSION_NAME";
     public static final String  COMMIT  = "$COMMIT";
+    public static final String  TOOLKIT = "$TOOLKIT_COMMIT";
     public static final String  DATE    = "$BUILD_DATE";
     public static final boolean RELEASE = $([ "$RELEASE" = "1" ] && echo true || echo false);
 

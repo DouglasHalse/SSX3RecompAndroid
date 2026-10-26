@@ -170,9 +170,11 @@ public class LauncherActivity extends Activity {
          * commit it came from -- the only useful identifier for a build that
          * is not a release. Stamped in by android/build_apk.sh. */
         TextView build = new TextView(this);
+        String toolkit = BuildInfo.TOOLKIT.isEmpty()
+                ? "" : " + toolkit " + BuildInfo.TOOLKIT;
         build.setText(BuildInfo.RELEASE
-                ? "Version " + BuildInfo.VERSION
-                : "Build " + BuildInfo.COMMIT + " \u00b7 " + BuildInfo.DATE);
+                ? "Version " + BuildInfo.VERSION + toolkit
+                : "Build " + BuildInfo.COMMIT + toolkit + " \u00b7 " + BuildInfo.DATE);
         build.setTextSize(12);
         build.setTextColor(0xFF5E7183);
         build.setPadding(0, pad / 6, 0, 0);

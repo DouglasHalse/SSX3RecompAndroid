@@ -55,6 +55,7 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && {
 }
 # Bump the version in one place and the release notes can quote it.
 COMMIT=$(git rev-parse --short HEAD)
+TOOLKIT_COMMIT=$( (cd "$ROOT/../xboxrecomp" && git rev-parse --short HEAD) 2>/dev/null || echo unknown )
 VERSION_CODE=$(git rev-list --count HEAD)
 
 say "building the APK for $TAG (commit $COMMIT, version code $VERSION_CODE)"
@@ -108,7 +109,7 @@ downloaded.
 the on-screen pad laid out like the GTA IV Android port's (which hides itself
 while a real controller is connected), saves, and the touch controls.
 
-Built from commit $COMMIT (version code $VERSION_CODE).
+Built from commit $COMMIT (version code $VERSION_CODE), toolkit $TOOLKIT_COMMIT.
 sha256 \`$SHA\`
 RELEASE
 fi
