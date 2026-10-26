@@ -20,6 +20,27 @@ from goals, reports and verification by a human running the port on a real phone
 code, the game recompilation and the renderer, is not: see
 [koenhendriks/SSX3-recomp](https://github.com/koenhendriks/SSX3-recomp).
 
+## Install on a phone
+
+Download `ssx3-android-<version>.apk` from the [Releases](../../releases) tab and open it on the
+phone (arm64, Android 11 or newer). Then:
+
+1. Open **SSX 3**. The launcher says which build it is: a release says `Version 0.1.0`, any
+   other build says `Build <commit> · <date>`.
+2. Tap **Select game image (.iso)** and pick **your own** SSX 3 disc image — `.iso` or `.xiso`,
+   trimmed or full redump. No game data is included in the APK and none is downloaded: the app
+   reads the image, checks it against the PAL disc this port was compiled from, and refuses
+   anything else, saying which disc it actually found.
+3. It extracts the disc into its own storage (about 2.1 GB, with a progress bar) and **Play**
+   appears when that finishes.
+
+The imported game, your saves and the settings live under
+`Android/data/com.douglashalse.ssx3/files/ssx3/`, so uninstalling the app removes them;
+re-importing the same image later keeps your saves, because they are separate files.
+
+Releases are signed with the same key every time (the one committed in
+`android/ssx3-debug.keystore`), so a newer APK installs over an older one and keeps the data.
+
 ## What this fork adds
 
 | | |
@@ -284,6 +305,20 @@ its status per platform and what is not ported yet.
 
 The toolkit is pinned at v0.13.1 (`193e299`), with this project's fixes in
 `patches/xboxrecomp-local.patch`.
+
+### Cutting a release
+
+`scripts/release.sh 0.1.0` builds the APK from the tree you are in, tags `android-v0.1.0` and
+publishes the APK to GitHub Releases with install notes. It refuses a dirty tree, an existing
+tag, or a missing `src/recomp/gen`: the recompiled game code is not in git, so a release is
+built where the disc rip and the regen output are — GitHub Actions cannot build this APK, and
+does not pretend to (`--dry-run` builds and prints what would be published, without touching
+GitHub).
+
+The APK is stamped with what it came from in three places that agree: the manifest
+(`versionName`, and `versionCode` from the commit count, so it always increases), a generated
+`BuildInfo` class that the launcher prints, and the release notes. A release build says
+`Version 0.1.0`; every other build says `Build <short commit> · <date>`.
 
 ## Testing
 
