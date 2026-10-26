@@ -19,10 +19,10 @@ layer and what a phone needs. The toolkit side of it lives in
 |---|---|
 | **An Android build.** | `android/` packages the port with the NDK and **no Gradle**: aapt2, javac, d8, zipalign, apksigner. arm64-v8a, minSdk 30, `libmain.so` + `libSDL2.so`, Vulkan through the phone's own driver. |
 | **It boots on a phone.** | The guest's 4 GB are reserved at a low base, because Android hands out 39-bit user addresses and refuses the fixed mappings a desktop takes for granted; the framebuffer is presented through SDL after SDL_main owns the window and the game runs on its own thread; storage is rooted in the app's own folder, which needs no permission at all (the manifest still asks for all-files access for the adb-pushed development path under `/sdcard/Download`, which the importer replaces); everything the game prints goes to logcat. |
-| **On-screen controls.** | A pad drawn over the frame — left analog stick, D-pad, the Xbox ABXY diamond, the shoulder cluster, BACK/START — reported as pad 0 through the same XID report a physical controller uses, so the game reads it exactly like real hardware. `RECOMP_TOUCH_PAD=0` hides it; `RECOMP_TOUCH_TRACE=1` shows what a touch hit. |
+| **On-screen controls.** | A pad drawn over the frame — left analog stick, D-pad, the Xbox ABXY diamond, the shoulder cluster, BACK/START — reported as pad 0 through the same XID report a physical controller uses, so the game reads it exactly like real hardware. `RECOMP_TOUCH_PAD=0` hides it; `RECOMP_TOUCH_TRACE=1` shows what a touch hit. The layout follows [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid)'s touch pad (see [Inspiration](#inspiration)). |
 | **Saving, loading and deleting on POSIX.** | The toolkit's file layer resolved only absolute names. A title deletes a save by opening each file *through the save folder's handle*, so on Android every delete failed while the files stayed on disk — the Windows backend had handled it from the start. Also: directory scans restart when a pattern is supplied, free their slot on close, and match with a portable glob (`fnmatch(..., FNM_CASEFOLD)` treats `*.*` literally). |
 | **Audio that keeps up.** | Throttle debt drains at a bounded rate instead of one lump after a stall, the audio thread runs at audio priority, the voice lock is taken only when a voice changes: 188 buffers/s (48 kHz), 0 underruns. |
-| **Disc image import** (in progress). | `src/android/xiso.c` reads an XDVDFS image **in place** through the file picker's descriptor — no 2 GB temporary copy — finds the volume descriptor in either the trimmed (`0x10000`) or redump (`0x18300000`) layout, fingerprints `default.xbe` against the PAL disc so a different region is refused *before* extracting 2 GB, and extracts the tree. The extractor is done and tested (`tests/xiso/run.sh`); the launcher screen around it is next. |
+| **Disc image import** (in progress). | `src/android/xiso.c` reads an XDVDFS image **in place** through the file picker's descriptor — no 2 GB temporary copy — finds the volume descriptor in either the trimmed (`0x10000`) or redump (`0x18300000`) layout, fingerprints `default.xbe` against the PAL disc so a different region is refused *before* extracting 2 GB, and extracts the tree. The extractor is done and tested (`tests/xiso/run.sh`); the launcher screen around it is next, following the installer flow of [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid) (see [Inspiration](#inspiration)). |
 | **Crash reports that name a caller.** | `RECOMP_NO_CRASH_HANDLER=1` hands the fault to the platform's debuggerd, whose tombstone carries a symbolized backtrace. That is how a boot crash in the log pump was traced to the guest CRT's `isatty` shadowing libc's. |
 
 ## Compatibility
@@ -57,6 +57,27 @@ than a refusal.
 **You need:** Android 11 (API 30) or newer, arm64-v8a, about 2.5 GB free for the game data,
 and your own rip of the **PAL** disc. A USA or Japanese disc is refused: the recompiled code is
 the PAL build, and the two are different code at the same addresses.
+
+## Inspiration
+
+The shape of this port follows
+[**LibertyRecompAndroid**](https://github.com/vaduur/LibertyRecompAndroid), the Android port of
+GTA IV's static recompilation. It is the clearest demonstration that a recompiled Xbox title can
+run on a phone with no emulator in between, and three of its decisions are the ones taken here:
+
+- a **launcher that imports the game image**, instead of expecting the data to be pushed onto
+  the device from a PC first;
+- an **on-screen touch pad** laid out the same way — analog stick and D-pad on the left, face
+  buttons and the shoulder cluster on the right, BACK and START centred at the top;
+- writing down **what was measured on which device**, so that a "works on my phone" claim
+  carries its GPU with it.
+
+Their [`docs/android/PORTING.md`](https://github.com/vaduur/LibertyRecompAndroid/blob/main/docs/android/PORTING.md)
+is the best write-up of the platform work in general (installer, file picker, Vulkan driver
+choice, per-thread tuning) and is worth reading even though SSX 3 runs on a different runtime.
+The code here is our own — SSX 3 rides this project's own recompiler and toolkit, so the
+Android layer lives in [DouglasHalse/xboxrecomp](https://github.com/DouglasHalse/xboxrecomp)
+rather than in a ReXGlue fork.
 
 ## Upstream: the Windows and Linux port
 
