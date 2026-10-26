@@ -147,6 +147,18 @@ public class LauncherActivity extends Activity {
         sub.setTextColor(0xFF8FA3B8);
         root.addView(sub);
 
+        /* What this APK is: a release says which one, anything else says the
+         * commit it came from -- the only useful identifier for a build that
+         * is not a release. Stamped in by android/build_apk.sh. */
+        TextView build = new TextView(this);
+        build.setText(BuildInfo.RELEASE
+                ? "Version " + BuildInfo.VERSION
+                : "Build " + BuildInfo.COMMIT + " \u00b7 " + BuildInfo.DATE);
+        build.setTextSize(12);
+        build.setTextColor(0xFF5E7183);
+        build.setPadding(0, pad / 6, 0, 0);
+        root.addView(build);
+
         status = new TextView(this);
         status.setTextSize(18);
         status.setTextColor(0xFFEAF2FF);
