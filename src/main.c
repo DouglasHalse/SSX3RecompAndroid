@@ -1077,7 +1077,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             CloseHandle(CreateThread(NULL, 0, test_crash_thread, (LPVOID)(intptr_t)atoi(tc), 0, NULL));
     }
 #else
-    install_crash_handler();
+    /* RECOMP_NO_CRASH_HANDLER=1: let the platform's debuggerd take the fault
+     * instead, so the tombstone carries a real backtrace (our handler prints
+     * its own, but only addresses). */
+    if (!getenv("RECOMP_NO_CRASH_HANDLER"))
+        install_crash_handler();
 #endif
 
     /* Step 1: Load XBE */
