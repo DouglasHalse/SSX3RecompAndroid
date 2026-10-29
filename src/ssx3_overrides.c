@@ -2498,6 +2498,43 @@ extern void sub_000E1AE0(void);   /* app vtbl[6]: sample input into the ring */
 extern void sub_000E1A80(void);   /* app vtbl[5]: is an input frame (update) due */
 extern void sub_000D7460(void);   /* loading state vtbl[6]: render */
 
+/* ── music director capture ──────────────────────────────────────────────────
+ *
+ * docs/capture.md. RECOMP_MUSIC_CAPTURE=<path> writes one JSONL line per signal
+ * the soundtrack reacts to. The wrappers below are compiled only with
+ * -DRECOMP_MUSIC_CAPTURE_HOOKS, and they need each function's generated body
+ * lifted to a _gen name first: scripts/regen.sh, see CLAUDE.md "Wrapping a
+ * function with many direct callers".
+ */
+#include "ssx3_music_capture.h"
+
+extern const char *ssx3_ScreenNow(void);
+
+#ifdef RECOMP_MUSIC_CAPTURE_HOOKS
+extern void sub_0018A6E0_gen(void);   /* send a numbered event */
+extern void sub_0018A8C0_gen(void);   /* write the control value */
+extern void sub_00111F40_gen(void);   /* reset it, with a strength */
+extern void sub_0010F370_gen(void);   /* course trigger -> event number */
+
+static void mx_wrap(const char *kind, uint32_t va, void (*fn)(void))
+{
+    if (mx_on()) {
+        uint32_t a[4];
+        a[0] = g_ecx;
+        a[1] = g_edx;
+        a[2] = MEM32(g_esp + 4);
+        a[3] = MEM32(g_esp + 8);
+        mx_sig(kind, va, a, 4);
+    }
+    fn();
+}
+
+void sub_0018A6E0(void) { mx_wrap("event", 0x0018A6E0u, sub_0018A6E0_gen); }
+void sub_0018A8C0(void) { mx_wrap("value", 0x0018A8C0u, sub_0018A8C0_gen); }
+void sub_00111F40(void) { mx_wrap("reset", 0x00111F40u, sub_00111F40_gen); }
+void sub_0010F370(void) { mx_wrap("trigger", 0x0010F370u, sub_0010F370_gen); }
+#endif
+
 static void trace_call(const char *name, void (*fn)(void), volatile LONG *n)
 {
     long k = InterlockedIncrement(n);
@@ -2608,6 +2645,13 @@ static void frametimer_stats(void)
 void *ssx3_lookup_trace(uint32_t va)
 {
     static int on = -1, stats = -1;
+    static int mx_ready;
+
+    if (!mx_ready) {
+        mx_ready = 1;
+        mx_set_screen_provider(ssx3_ScreenNow);
+        mx_on();
+    }
 
     if (stats < 0)
         stats = getenv("RECOMP_FRAMETIMER_STATS") != NULL;

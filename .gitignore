@@ -103,3 +103,6 @@ system/
 pad.cfg
 pad.txt
 /*.png
+
+# ride captures (tools/capture writes here)
+/capture/

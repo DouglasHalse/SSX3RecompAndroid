@@ -68,6 +68,7 @@ set(GAME_SOURCES
     src/perf.c
     src/recomp_manual.c
     src/ssx3_overrides.c
+    src/ssx3_music_capture.c
     src/thread_dump.c
     src/game_state.c
     src/camera_mode.c

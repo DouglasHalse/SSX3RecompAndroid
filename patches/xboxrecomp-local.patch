@@ -1,3 +1,23 @@
+diff --git a/README.md b/README.md
+index e11dff5..746ed0b 100644
+--- a/README.md
++++ b/README.md
+@@ -11,6 +11,15 @@
+  Static Recompilation Toolkit for Original Xbox Games
+ ```
+ 
++> **This is the `android-port` branch of a fork** —
++> [DouglasHalse/xboxrecomp](https://github.com/DouglasHalse/xboxrecomp) — carrying the toolkit
++> changes behind [SSX3RecompAndroid](https://github.com/DouglasHalse/SSX3RecompAndroid), an
++> Android port of an Xbox game built on this toolkit.
++>
++> The Android-specific work on this branch is **AI-written** (Hermes Agent driving a large
++> language model), under a human who supplied the rip and verified results by running the port
++> on a Galaxy S24. Upstream's code is untouched; the changes are separate commits on this branch.
++
+ > Turn any Xbox game binary into a native Windows executable. No emulation. No interpreter. Just raw, recompiled C.
+ 
+ **[Join the sp00nznet recomp Discord](https://discord.gg/CRpzGWZFcu)** — the
 diff --git a/src/apu/CMakeLists.txt b/src/apu/CMakeLists.txt
 index 0bd4ebd..70568cb 100644
 --- a/src/apu/CMakeLists.txt
@@ -579,10 +599,14 @@ index f45b42b..440ecf3 100644
  
  static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
 diff --git a/src/apu/apu_xaudio2.c b/src/apu/apu_xaudio2.c
-index cd69e57..2c9a504 100644
+index cd69e57..482aece 100644
 --- a/src/apu/apu_xaudio2.c
 +++ b/src/apu/apu_xaudio2.c
-@@ -11,8 +11,8 @@
+@@ -8,11 +8,12 @@
+ 
+ #include <stdint.h>
+ #include <stdio.h>
++#include <stdlib.h>
  #include <string.h>
  #include "apu_xaudio2.h"
  
@@ -593,7 +617,7 @@ index cd69e57..2c9a504 100644
  #if defined(_WIN32)
  
  #define COBJMACROS
-@@ -23,17 +23,57 @@
+@@ -23,17 +24,57 @@
  #pragma comment(lib, "ole32.lib")
  
  #define XA2_SAMPLE_RATE   48000
@@ -654,7 +678,7 @@ index cd69e57..2c9a504 100644
  
  int xa2_init(void)
  {
-@@ -42,6 +82,7 @@ int xa2_init(void)
+@@ -42,6 +83,7 @@ int xa2_init(void)
      WAVEFORMATEX wfx = { 0 };
  
      if (g_xa2_initialized) return 1;
@@ -662,7 +686,7 @@ index cd69e57..2c9a504 100644
  
      hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
      if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
-@@ -56,8 +97,10 @@ int xa2_init(void)
+@@ -56,8 +98,10 @@ int xa2_init(void)
          goto fail;
      }
  
@@ -674,7 +698,7 @@ index cd69e57..2c9a504 100644
      if (FAILED(hr)) {
          fprintf(stderr, "[XA2] CreateMasteringVoice failed: 0x%08lX\n", hr);
          goto fail;
-@@ -70,8 +113,26 @@ int xa2_init(void)
+@@ -70,8 +114,26 @@ int xa2_init(void)
      wfx.nBlockAlign     = XA2_CHANNELS * 2;
      wfx.nAvgBytesPerSec = XA2_SAMPLE_RATE * wfx.nBlockAlign;
  
@@ -703,7 +727,7 @@ index cd69e57..2c9a504 100644
      if (FAILED(hr)) {
          fprintf(stderr, "[XA2] CreateSourceVoice failed: 0x%08lX\n", hr);
          goto fail;
-@@ -87,8 +148,8 @@ int xa2_init(void)
+@@ -87,8 +149,8 @@ int xa2_init(void)
      g_xa2_initialized = 1;
      g_xa2_frames_written = 0;
  
@@ -714,7 +738,101 @@ index cd69e57..2c9a504 100644
      return 1;
  
  fail:
-@@ -135,14 +196,68 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
+@@ -127,6 +189,93 @@ int xa2_is_active(void)
+ 
+ /* Submit a buffer of mixed samples to XAudio2.
+  * Called from APU frame thread. Returns 1 if buffer was submitted. */
++/*
++ * RECOMP_AUDIO_WAV=<path> -- write what the game plays, 16-bit stereo at the
++ * mixer's rate, so the soundtrack can be analysed offline against a scripted
++ * ride. The header is patched on exit; a killed process leaves it short by the
++ * frames that were not flushed, which the reader can detect and ignore.
++ */
++#define WAV_RATE 48000
++#define WAV_CHANNELS 2
++
++static FILE *g_wav;
++static long g_wav_bytes;
++static int g_wav_open_tried;
++
++static void wav_put32(unsigned char *p, uint32_t v)
++{
++    p[0] = (unsigned char)(v & 0xFF);
++    p[1] = (unsigned char)((v >> 8) & 0xFF);
++    p[2] = (unsigned char)((v >> 16) & 0xFF);
++    p[3] = (unsigned char)((v >> 24) & 0xFF);
++}
++
++static void wav_tap_open(void)
++{
++    unsigned char h[44];
++    const char *path;
++
++    if (g_wav_open_tried)
++        return;
++    g_wav_open_tried = 1;
++    path = getenv("RECOMP_AUDIO_WAV");
++    if (!path || !*path)
++        return;
++    g_wav = fopen(path, "wb");
++    if (!g_wav) {
++        fprintf(stderr, "[WAV] cannot open %s\n", path);
++        return;
++    }
++    memset(h, 0, sizeof h);
++    memcpy(h + 0, "RIFF", 4);
++    memcpy(h + 8, "WAVEfmt ", 8);
++    wav_put32(h + 4, 36);
++    wav_put32(h + 16, 16);                 /* fmt chunk size */
++    h[20] = 1;                             /* PCM */
++    h[22] = WAV_CHANNELS;
++    wav_put32(h + 24, WAV_RATE);
++    wav_put32(h + 28, WAV_RATE * WAV_CHANNELS * 2);
++    h[32] = WAV_CHANNELS * 2;              /* block align */
++    h[34] = 16;
++    memcpy(h + 36, "data", 4);
++    fwrite(h, 1, sizeof h, g_wav);
++    fprintf(stderr, "[WAV] capturing the mix to %s\n", path);
++}
++
++static void wav_tap_close(void)
++{
++    unsigned char sz[4];
++
++    if (!g_wav)
++        return;
++    fflush(g_wav);
++    fseek(g_wav, 4, SEEK_SET);
++    wav_put32(sz, (uint32_t)(36 + g_wav_bytes));
++    fwrite(sz, 1, 4, g_wav);
++    fseek(g_wav, 40, SEEK_SET);
++    wav_put32(sz, (uint32_t)g_wav_bytes);
++    fwrite(sz, 1, 4, g_wav);
++    fclose(g_wav);
++    g_wav = NULL;
++}
++
++static void wav_tap(const int16_t *samples, int num_samples)
++{
++    size_t n;
++
++    if (!g_wav_open_tried) {
++        wav_tap_open();
++        if (g_wav)
++            atexit(wav_tap_close);
++    }
++    if (!g_wav || !samples || num_samples <= 0)
++        return;
++    n = (size_t)num_samples * WAV_CHANNELS;
++    g_wav_bytes += (long)fwrite(samples, sizeof(int16_t), n, g_wav);
++    if ((g_wav_bytes & 0xFFFF) < (long)num_samples * WAV_CHANNELS)
++        fflush(g_wav);
++}
++
+ int xa2_submit_samples(const int16_t *samples, int num_samples)
+ {
+     XAUDIO2_VOICE_STATE state;
+@@ -135,14 +284,68 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
      int copy_samples;
      HRESULT hr;
  
@@ -785,7 +903,7 @@ index cd69e57..2c9a504 100644
  
      memset(&xbuf, 0, sizeof(xbuf));
      xbuf.AudioBytes = copy_samples * XA2_CHANNELS * sizeof(int16_t);
-@@ -156,17 +271,260 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
+@@ -156,17 +359,262 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
      return 1;
  }
  
@@ -815,12 +933,11 @@ index cd69e57..2c9a504 100644
 +    return (int)state.BuffersQueued;
 +}
 +
- int xa2_get_buffer_size(void)
- {
-     return XA2_BUF_SAMPLES;
- }
- 
--#else /* !_WIN32 -- POSIX stubs (no audio output yet) */
++int xa2_get_buffer_size(void)
++{
++    return XA2_BUF_SAMPLES;
++}
++
 +#elif defined(__EMSCRIPTEN__) /* -- ring in shared memory, AudioWorklet */
 +
 +/* The page's AudioWorklet (web/ in the game project) reads this ring straight
@@ -885,6 +1002,8 @@ index cd69e57..2c9a504 100644
 +    int queued, max_queued;
 +    uint32_t u;
 +
++    wav_tap(samples, num_samples);
++
 +    if (!g_web_on) return 0;
 +    if (num_samples > XA2_BUF_SAMPLES) num_samples = XA2_BUF_SAMPLES;
 +    g_web_buf_samples = num_samples;
@@ -919,22 +1038,18 @@ index cd69e57..2c9a504 100644
 +    g_web_underruns = g_web_drops = g_web_refills = 0;
 +    g_web_min_queued = 1 << 30;
 +}
- 
--int  xa2_init(void)                                   { return 0; }
--void xa2_shutdown(void)                               {}
--int  xa2_is_active(void)                              { return 0; }
--int  xa2_submit_samples(const int16_t *s, int n)      { (void)s; (void)n; return 0; }
--int  xa2_get_buffer_size(void)                        { return 0; }
++
 +int xa2_queued(void)
 +{
 +    return g_web_on ? web_queued(g_web_buf_samples) : 0;
 +}
 +
-+int xa2_get_buffer_size(void)
-+{
-+    return XA2_BUF_SAMPLES;
-+}
-+
+ int xa2_get_buffer_size(void)
+ {
+     return XA2_BUF_SAMPLES;
+ }
+ 
+-#else /* !_WIN32 -- POSIX stubs (no audio output yet) */
 +#else /* !_WIN32 -- SDL2 audio queue */
 +
 +int xa2_channels(void) { return 2; }      /* 5.1: Windows (XAudio2) only */
@@ -955,7 +1070,12 @@ index cd69e57..2c9a504 100644
 +int xa2_init(void)
 +{
 +    SDL_AudioSpec want, have;
-+
+ 
+-int  xa2_init(void)                                   { return 0; }
+-void xa2_shutdown(void)                               {}
+-int  xa2_is_active(void)                              { return 0; }
+-int  xa2_submit_samples(const int16_t *s, int n)      { (void)s; (void)n; return 0; }
+-int  xa2_get_buffer_size(void)                        { return 0; }
 +    if (g_sdl_dev) return 1;
 +    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
 +        fprintf(stderr, "[XA2] SDL audio init failed: %s\n", SDL_GetError());
@@ -1669,6 +1789,158 @@ index a045752..84373a5 100644
  else()
      # Linux: platform layer (POSIX host primitives) + OpenSSL for crypto.
      find_package(OpenSSL REQUIRED)
+diff --git a/src/kernel/guest_ptr.h b/src/kernel/guest_ptr.h
+new file mode 100644
+index 0000000..c24d5b4
+--- /dev/null
++++ b/src/kernel/guest_ptr.h
+@@ -0,0 +1,27 @@
++/* Guest VA -> host pointer, for host code that reads or writes guest memory
++ * (device models, bridges, diagnostics).
++ *
++ * Natively the guest is laid out 1:1 at a host offset, so this is offset + va
++ * for every mapped range (RAM, its mirrors, the contiguous window, the
++ * apertures). The web build has no such layout: a page map with 1 MB
++ * granularity gives each guest MB its host delta (guest_wasm.c). Pointer
++ * arithmetic on the result is fine within one mapped range. */
++#ifndef XBOXRECOMP_GUEST_PTR_H
++#define XBOXRECOMP_GUEST_PTR_H
++#include <stddef.h>
++#include <stdint.h>
++
++#if defined(__EMSCRIPTEN__)
++extern uint32_t g_xbox_pagemap[4096];
++#define XBOX_HOST(va) ((uint8_t *)(uintptr_t)((uint32_t)(va) + g_xbox_pagemap[(uint32_t)(va) >> 20]))
++#else
++ptrdiff_t xbox_GetMemoryOffset(void);
++#define XBOX_HOST(va) ((uint8_t *)xbox_GetMemoryOffset() + (uint32_t)(va))
++#endif
++
++void *xbox_GuestToHost(uint32_t va);
++/* The inverse, for diagnostics (a guest object the host holds a pointer to).
++ * On the web build it knows RAM and the contiguous window; else 0. */
++uint32_t xbox_HostToGuest(const void *host);
++
++#endif
+diff --git a/src/kernel/guest_wasm.c b/src/kernel/guest_wasm.c
+new file mode 100644
+index 0000000..45b6a74
+--- /dev/null
++++ b/src/kernel/guest_wasm.c
+@@ -0,0 +1,113 @@
++/*
++ * Guest address space for the WebAssembly build.
++ *
++ * Natively the guest's 4 GB are laid out 1:1 at a host offset, with the RAM
++ * mirrors, the contiguous window and the tiled aperture as extra views of the
++ * same pages. wasm32 has one linear memory, no fixed placement and no
++ * aliasing, so every guest access goes through g_xbox_pagemap instead (see
++ * XBOX_PTR in recomp_types.h): one entry per guest MB holding the host delta,
++ * host = va + delta (mod 2^32).
++ *
++ *   0x00000000  RAM (map size, 64 MB retail), plus mirrors every map size
++ *               up to 1 + XBOX_NUM_MIRRORS map sizes (same pages)
++ *   0x80000000  contiguous window (XBOX_CONTIG_SIZE)
++ *   0xF0000000  tiled aperture: the contiguous window again
++ *   0xFD000000  NV2A registers, 16 MB of plain memory
++ *   0xFE800000  MCPX registers, 8 MB (device ranges are serviced by
++ *               xbox_mmio_read/write before the page map is consulted)
++ *   0xFF000000  flash, 1 MB
++ *   elsewhere   one shared scratch MB: reads garbage, never traps
++ */
++#if defined(__EMSCRIPTEN__)
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "kernel.h"
++#include "xbox_memory_layout.h"
++
++#define MB (1u << 20)
++
++uint32_t g_xbox_pagemap[4096];
++
++static uint8_t *s_ram, *s_contig, *s_nv2a, *s_mcpx, *s_flash, *s_scratch;
++static size_t s_ram_size;
++static uint32_t s_contig_base, s_contig_size;
++
++static uint8_t *block(size_t bytes)
++{
++    void *p = aligned_alloc(MB, bytes);
++    if (p)
++        memset(p, 0, bytes);
++    return (uint8_t *)p;
++}
++
++static void map(uint32_t va, uint32_t bytes, uint8_t *host)
++{
++    uint32_t mb;
++    for (mb = va >> 20; mb < ((va + (bytes - 1)) >> 20) + 1 && mb < 4096; mb++)
++        g_xbox_pagemap[mb] = (uint32_t)(uintptr_t)host - va;
++}
++
++/* Allocates every block and fills the page map. Returns the RAM block, the
++ * host address of guest 0. */
++void *xbox_WasmMapGuest(size_t ram_size, unsigned mirrors,
++                        uint32_t contig_base, uint32_t contig_size,
++                        uint32_t tiled_base, uint32_t tiled_size)
++{
++    uint32_t mb, m;
++
++    if (s_ram)
++        return s_ram;
++    s_ram_size = ram_size;
++    s_contig_base = contig_base;
++    s_contig_size = contig_size;
++    s_ram     = block(ram_size);
++    s_contig  = block(contig_size);
++    s_nv2a    = block(16 * MB);
++    s_mcpx    = block(8 * MB);
++    s_flash   = block(MB);
++    s_scratch = block(MB);
++    if (!s_ram || !s_contig || !s_nv2a || !s_mcpx || !s_flash || !s_scratch) {
++        fprintf(stderr, "xbox_WasmMapGuest: out of memory\n");
++        return NULL;
++    }
++    for (mb = 0; mb < 4096; mb++)
++        g_xbox_pagemap[mb] = (uint32_t)(uintptr_t)s_scratch - (mb << 20);
++    for (m = 1; m <= mirrors; m++) {
++        uint64_t lo = (uint64_t)m * ram_size;
++        if (lo + ram_size > contig_base)
++            break;
++        map((uint32_t)lo, (uint32_t)ram_size, s_ram);
++    }
++    map(0, (uint32_t)ram_size, s_ram);
++    map(contig_base, contig_size, s_contig);
++    map(tiled_base, tiled_size < contig_size ? tiled_size : contig_size, s_contig);
++    map(0xFD000000u, 16 * MB, s_nv2a);
++    map(0xFE800000u, 8 * MB, s_mcpx);
++    map(0xFF000000u, MB, s_flash);
++    fprintf(stderr, "  [WASM] guest memory: RAM %u MB at %p (+%u mirrors), contiguous"
++            " %u MB at %p, NV2A %p, MCPX %p, flash %p\n",
++            (unsigned)(ram_size / MB), (void *)s_ram, m - 1,
++            contig_size / MB, (void *)s_contig, (void *)s_nv2a,
++            (void *)s_mcpx, (void *)s_flash);
++    return s_ram;
++}
++
++uint32_t xbox_HostToGuest(const void *host)
++{
++    const uint8_t *h = (const uint8_t *)host;
++    if (s_ram && h >= s_ram && h < s_ram + s_ram_size)
++        return (uint32_t)(h - s_ram);
++    if (s_contig && h >= s_contig && h < s_contig + s_contig_size)
++        return s_contig_base + (uint32_t)(h - s_contig);
++    return 0;
++}
++
++/* Host address of a mapped aperture, by its guest base. */
++void *xbox_WasmBlock(uint32_t guest_base)
++{
++    return (void *)(uintptr_t)(guest_base + g_xbox_pagemap[guest_base >> 20]);
++}
++#endif
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
 index c65ba43..79cb9fb 100644
 --- a/src/kernel/kernel_bridge.c
@@ -2964,7 +3236,7 @@ index c65ba43..79cb9fb 100644
          old_protect,
          &old_protect
 diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
-index 42135e0..4b0bf7d 100644
+index 42135e0..f63e442 100644
 --- a/src/kernel/kernel_file.c
 +++ b/src/kernel/kernel_file.c
 @@ -18,6 +18,8 @@
@@ -2976,7 +3248,30 @@ index 42135e0..4b0bf7d 100644
  
  #if !defined(_WIN32)
  #include <fcntl.h>
-@@ -792,6 +794,41 @@ static ULONG mode_to_xbox_attrs(mode_t m)
+@@ -67,6 +69,22 @@ uint32_t xbox_LastFileError(void)
+     return g_xbox_last_file_error;
+ }
+ 
++/* Hook a title can install to observe its own file traffic -- SSX 3 journals
++ * saves and loads from it (it matches a save's Data.ssx open to name the
++ * event). Called once per successful open with the name as the title asked for
++ * it, and whether the open can write. NULL unless a title installs one, so the
++ * cost is a load and a branch per open. The Windows backend does not call it
++ * yet: it would have to convert the wide path back, and no title that installs
++ * the hook has been built for Windows. */
++void (*volatile xbox_file_hook)(const char* xbox_path, int write, int32_t status) = NULL;
++
++/* True when an open with these access rights can write. */
++static int file_access_writes(ACCESS_MASK access)
++{
++    return (access & (XBOX_GENERIC_WRITE | XBOX_GENERIC_ALL |
++                      XBOX_FILE_WRITE_DATA | XBOX_FILE_APPEND_DATA)) != 0;
++}
++
+ #if defined(_WIN32)
+ /* ====================  Win32 backend  =================================== */
+ /* ======================================================================== */
+@@ -792,6 +810,41 @@ static ULONG mode_to_xbox_attrs(mode_t m)
      return a;
  }
  
@@ -3018,7 +3313,7 @@ index 42135e0..4b0bf7d 100644
  static NTSTATUS errno_to_status(int e)
  {
      switch (e) {
-@@ -805,6 +842,62 @@ static NTSTATUS errno_to_status(int e)
+@@ -805,6 +858,62 @@ static NTSTATUS errno_to_status(int e)
      }
  }
  
@@ -3081,7 +3376,7 @@ index 42135e0..4b0bf7d 100644
  NTSTATUS __stdcall xbox_NtCreateFile(
      PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
      PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
-@@ -818,13 +911,18 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -818,13 +927,18 @@ NTSTATUS __stdcall xbox_NtCreateFile(
          return STATUS_INVALID_PARAMETER;
  
      const char* xbox_path = get_xbox_path(ObjectAttributes);
@@ -3102,7 +3397,7 @@ index 42135e0..4b0bf7d 100644
          if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
              mkdir(host_path, 0755);   /* EEXIST is fine */
          fd = open(host_path, O_RDONLY | O_DIRECTORY);
-@@ -835,6 +933,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -835,6 +949,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      if (fd < 0) {
          int e = errno;
          XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile FAILED: %s (errno=%d)", host_path, e);
@@ -3114,7 +3409,7 @@ index 42135e0..4b0bf7d 100644
          if (IoStatusBlock) {
              IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
              IoStatusBlock->Information = 0;
-@@ -843,6 +946,14 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -843,6 +962,16 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      }
  
      *FileHandle = w32_open_handle(fd, host_path);
@@ -3122,6 +3417,8 @@ index 42135e0..4b0bf7d 100644
 +     * scan state filed under that address belongs to the previous life of the
 +     * handle and must not be continued (see dir_context_release). */
 +    dir_context_release(*FileHandle);
++    if (xbox_file_hook)
++        xbox_file_hook(xbox_path, file_access_writes(DesiredAccess), (int32_t)STATUS_SUCCESS);
 +    if (file_trace() && (strstr(host_path, "UDATA") || strstr(host_path, "TDATA")))
 +        fprintf(stderr, "  [FILE-T] create '%s' disp=%u access=0x%X opts=0x%X -> handle=%p\n",
 +                host_path, (unsigned)CreateDisposition, (unsigned)DesiredAccess,
@@ -3129,7 +3426,7 @@ index 42135e0..4b0bf7d 100644
      if (IoStatusBlock) {
          IoStatusBlock->Status = STATUS_SUCCESS;
          IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
-@@ -907,11 +1018,26 @@ NTSTATUS __stdcall xbox_NtWriteFile(
+@@ -907,11 +1036,26 @@ NTSTATUS __stdcall xbox_NtWriteFile(
  
      ssize_t n = write(fd, Buffer, Length);
      if (n < 0) {
@@ -3156,7 +3453,7 @@ index 42135e0..4b0bf7d 100644
  
      IoStatusBlock->Status = STATUS_SUCCESS;
      IoStatusBlock->Information = (ULONG_PTR)n;
-@@ -923,6 +1049,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
+@@ -923,6 +1067,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
  {
      XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
      if (Handle && Handle != INVALID_HANDLE_VALUE) {
@@ -3164,7 +3461,7 @@ index 42135e0..4b0bf7d 100644
          CloseHandle(Handle);
          return STATUS_SUCCESS;
      }
-@@ -933,11 +1060,21 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
+@@ -933,11 +1078,21 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
  {
      char host_path[MAX_PATH];
      const char* xbox_path = get_xbox_path(ObjectAttributes);
@@ -3189,7 +3486,7 @@ index 42135e0..4b0bf7d 100644
      return STATUS_OBJECT_NAME_NOT_FOUND;
  }
  
-@@ -953,6 +1090,12 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+@@ -953,6 +1108,12 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
      if (fd < 0)
          return STATUS_INVALID_HANDLE;
  
@@ -3202,7 +3499,7 @@ index 42135e0..4b0bf7d 100644
      struct stat st;
      if (FileInformationClass != XboxFilePositionInformation) {
          if (fstat(fd, &st) != 0)
-@@ -1023,6 +1166,12 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+@@ -1023,6 +1184,12 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
      if (fd < 0)
          return STATUS_INVALID_HANDLE;
  
@@ -3215,7 +3512,7 @@ index 42135e0..4b0bf7d 100644
      switch (FileInformationClass) {
          case XboxFilePositionInformation: {
              PXBOX_FILE_POSITION_INFORMATION info = (PXBOX_FILE_POSITION_INFORMATION)FileInformation;
-@@ -1044,7 +1193,10 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+@@ -1044,7 +1211,10 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
               * matches NT "delete on close" semantics exactly. */
              if (info->DeleteFile) {
                  const char* p = w32_handle_path(FileHandle);
@@ -3227,7 +3524,7 @@ index 42135e0..4b0bf7d 100644
              }
              IoStatusBlock->Status = STATUS_SUCCESS;
              return STATUS_SUCCESS;
-@@ -1079,6 +1231,11 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+@@ -1079,6 +1249,11 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
              PXBOX_FILE_FS_SIZE_INFORMATION info = (PXBOX_FILE_FS_SIZE_INFORMATION)FsInformation;
              struct statvfs vfs;
              int fd = w32_handle_fd(FileHandle);
@@ -3239,7 +3536,7 @@ index 42135e0..4b0bf7d 100644
              /* Xbox geometry, not the host's -- see the note on
               * XBOX_SECTORS_PER_CLUSTER above. */
              info->BytesPerSector = XBOX_BYTES_PER_SECTOR;
-@@ -1107,7 +1264,13 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+@@ -1107,7 +1282,13 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
  NTSTATUS __stdcall xbox_NtFlushBuffersFile(HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock)
  {
      int fd = w32_handle_fd(FileHandle);
@@ -3254,7 +3551,7 @@ index 42135e0..4b0bf7d 100644
      if (IoStatusBlock) {
          IoStatusBlock->Status = STATUS_SUCCESS;
          IoStatusBlock->Information = 0;
-@@ -1125,8 +1288,10 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+@@ -1125,8 +1306,10 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
      if (!FileInformation)
          return STATUS_INVALID_PARAMETER;
      const char* xbox_path = get_xbox_path(ObjectAttributes);
@@ -3266,7 +3563,7 @@ index 42135e0..4b0bf7d 100644
      if (stat(host_path, &st) != 0)
          return STATUS_OBJECT_NAME_NOT_FOUND;
  
-@@ -1148,10 +1313,67 @@ typedef struct {
+@@ -1148,10 +1331,67 @@ typedef struct {
      char   pattern[64];
  } DIR_CONTEXT;
  
@@ -3334,7 +3631,7 @@ index 42135e0..4b0bf7d 100644
  NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
      PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation, ULONG Length,
-@@ -1170,6 +1392,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1170,6 +1410,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      if (!s_dir_cs_init) { InitializeCriticalSection(&s_dir_cs); s_dir_cs_init = TRUE; }
      EnterCriticalSection(&s_dir_cs);
  
@@ -3350,7 +3647,7 @@ index 42135e0..4b0bf7d 100644
      /* Locate or create the per-handle enumeration context. */
      DIR_CONTEXT* ctx = NULL;
      for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
-@@ -1177,12 +1408,19 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1177,12 +1426,19 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      if (!ctx) {
          for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
              if (s_dir_contexts[i].handle == NULL) { ctx = &s_dir_contexts[i]; break; }
@@ -3372,7 +3669,7 @@ index 42135e0..4b0bf7d 100644
          if (ctx->dir) { closedir(ctx->dir); ctx->dir = NULL; }
          const char* dpath = w32_handle_path(FileHandle);
          if (!dpath) { LeaveCriticalSection(&s_dir_cs); return STATUS_UNSUCCESSFUL; }
-@@ -1218,8 +1456,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1218,8 +1474,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
          }
          if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
              continue;
@@ -4050,6 +4347,111 @@ index 4ebdfb9..6508945 100644
      default:
          xbox_log(XBOX_LOG_WARN, XBOX_LOG_XBOX,
              "ExQueryNonVolatileSetting: unhandled index 0x%02X", ValueIndex);
+diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+new file mode 100644
+index 0000000..2102f59
+--- /dev/null
++++ b/src/kernel/nv2a_backend.h
+@@ -0,0 +1,99 @@
++/**
++ * Pluggable GPU backend for the pushbuffer executor.
++ *
++ * The executor parses the pushbuffer, tracks state and runs vertex programs.
++ * With a backend registered it hands the rasterising to it instead of
++ * drawing pixels itself. The backend is optional: with none set, nothing
++ * here is used.
++ */
++#ifndef XBOXRECOMP_NV2A_BACKEND_H
++#define XBOXRECOMP_NV2A_BACKEND_H
++
++#include <stdint.h>
++#include <stdio.h>
++#include "nv2a_vsh_interp.h"
++#include "nv2a_combiner.h"
++
++typedef struct {
++    uint32_t color_offset;          /* guest address of the colour surface */
++    uint32_t pitch;
++    uint32_t x, y, width, height;   /* clip rectangle */
++    uint32_t bpp;                   /* 2 or 4 */
++    int      swizzled;              /* render target stored Morton-swizzled */
++    uint32_t zeta_offset;
++    uint32_t zmax;                  /* 0xFFFF (Z16) or 0xFFFFFF (Z24S8) */
++    int      depth_test, depth_write;
++    uint32_t depth_func;            /* GL enum, as the NV2A takes it */
++    int      w_buffer;              /* CONTROL0 Z_PERSPECTIVE: depth is w, not z */
++    /* Stencil (Z24S8 only): STENCIL_TEST_ENABLE and 0x0360..0x0378 -- write
++     * mask, func (GL enum), ref, read mask, op fail / zfail / zpass (GL
++     * enums: KEEP 0x1E00, ZERO 0, REPLACE 0x1E01, INCRSAT 0x1E02, DECRSAT
++     * 0x1E03, INVERT 0x150A, INCR 0x8507, DECR 0x8508); stencil_clear is
++     * the ZSTENCIL_CLEAR_VALUE's stencil byte. */
++    int      stencil_test;
++    uint32_t stencil_write_mask, stencil_func, stencil_ref, stencil_read_mask;
++    uint32_t stencil_fail, stencil_zfail, stencil_zpass, stencil_clear;
++    /* Per-pixel state (GL enums as the NV2A takes them). */
++    int      blend_enable;
++    uint32_t blend_sfactor, blend_dfactor, blend_equation, blend_color; /* ARGB */
++    uint32_t color_mask;            /* A<<24 R<<16 G<<8 B, non-zero byte = write */
++    int      alpha_test;
++    uint32_t alpha_func, alpha_ref;
++    Nv2aCombiner rc;
++    int      rc_seen;               /* combiners programmed by the title */
++    uint32_t fog_enable, fog_mode, fog_color;   /* fog_color: FOG_COLOR as written (R in bits 0-7) */
++    float    fog_param[2];
++    /* Points: size in pixels (SET_POINT_SIZE / 8, 1 if unset), used unless
++     * point_params (then the program's oPts.x); point_sprite = stage 3
++     * coordinates come from the position inside the point. */
++    float    point_size;
++    int      point_params, point_sprite;
++} Nv2aTarget;
++
++typedef struct {
++    int      valid;
++    uint32_t offset, width, height;
++    uint32_t addr_u, addr_v;        /* 1 wrap 2 mirror 3 clamp 4 border 5 clamp-to-edge */
++    int      linear_filter;         /* magnification */
++    int      normalised;            /* swizzled/DXT: coords normalised; else texels */
++    uint32_t format;                /* NV097 colour format code */
++    uint32_t stage_program;         /* SET_SHADER_STAGE_PROGRAM, 5 bits per stage */
++    uint64_t hash;                  /* of the base level's bytes (this frame) */
++    int      cube;                  /* cube map: decoded as six faces stacked, +X -X +Y -Y +Z -Z */
++} Nv2aTexInfo;
++
++/* Texture stage description, and mip 0 decoded to A8R8G8B8 (width*height
++ * dwords; a cube map width*height*6, the faces one below the other). Both
++ * return 0 if the stage is unusable. */
++int nv2a_exec_tex_info(int stage, Nv2aTexInfo *info);
++int nv2a_exec_tex_decode(int stage, uint32_t *out);
++
++/* Trace aid: the current batch's program, constants and vertex inputs. */
++void nv2a_exec_dump_batch(FILE *f, uint32_t max_vertices);
++
++#define NV2A_CLEAR_Z      0x01
++#define NV2A_CLEAR_STENCIL 0x02
++#define NV2A_CLEAR_COLOR  0xF0
++
++typedef struct {
++    /* One draw call after the vertex program: n vertices, assembled
++     * according to prim (NV097 primitive code). Return 1 if consumed. */
++    int  (*draw)(const Nv2aTarget *t, uint32_t prim, const Nv2aVshOutput *v, uint32_t n);
++    /* CLEAR_SURFACE; argb and depth are already decoded (depth 0..1). */
++    /* Return 1 if consumed (else the executor clears guest memory itself). */
++    int  (*clear)(const Nv2aTarget *t, uint32_t flags, uint32_t argb, float depth);
++    /* A finished frame is being presented from t: the backend must have
++     * written it into guest memory (A8R8G8B8 / R5G6B5 at color_offset). */
++    void (*flip)(const Nv2aTarget *t);
++    /* Optional: the same draw with the vertex program left to the backend
++     * (run on the GPU). in: n vertices of p->nin float4 inputs each (packed
++     * by p->in_slot), in draw order. Return 1 if consumed; 0 and the
++     * executor runs the program itself and calls draw. Not offered when the
++     * program writes constants (vertex order matters then). */
++    int  (*draw_vsh)(const Nv2aTarget *t, uint32_t prim, const float *in, uint32_t n,
++                     const Nv2aVshProgram *p);
++} Nv2aBackend;
++
++void nv2a_exec_set_backend(const Nv2aBackend *b);
++
++#endif
 diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
 index c65632c..35cb429 100644
 --- a/src/kernel/nv2a_pb_exec.c
@@ -7983,7 +8385,7 @@ index 94ff7b2..2a01b28 100644
  /* Report counts at exit, so a run says whether the driver ever looked. */
  void xbox_OhciReport(void);
 diff --git a/src/usb/usb_gamepad.c b/src/usb/usb_gamepad.c
-index bd00f3f..8a4137a 100644
+index bd00f3f..96dbd65 100644
 --- a/src/usb/usb_gamepad.c
 +++ b/src/usb/usb_gamepad.c
 @@ -442,6 +442,55 @@ static void pad_script_compact(unsigned long t)
@@ -8086,11 +8488,55 @@ index bd00f3f..8a4137a 100644
                  npending = 0;
              }
          } else if (npending < sizeof pending - 1) {
+@@ -556,6 +591,17 @@ static void pad_script_apply(int pad, uint8_t *out)
+     }
+ }
+ 
++void (*volatile xbox_pad_override)(uint8_t *report20) = NULL;
++
++/* Merge the on-screen pad into a finished report. Pad 0 only: a title reads
++ * player 1 from the first pad, and a second report would fight the host pad for
++ * the same buttons. */
++static void pad_touch_apply(int pad, uint8_t *out)
++{
++    if (pad == 0 && xbox_pad_override)
++        xbox_pad_override(out);
++}
++
+ int usb_gamepad_report(int pad, uint8_t *out, int max)
+ {
+     XBOX_INPUT_STATE state;
+@@ -611,6 +657,7 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
+     if (xbox_InputGetState((DWORD)pad, &state) != 0) {
+         out[2] = synth;
+         pad_script_apply(pad, out);
++        pad_touch_apply(pad, out);
+         return 20;
+     }
+ 
+@@ -628,5 +675,6 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
+     out[18] = (uint8_t)(g->sThumbRY & 0xFF);
+     out[19] = (uint8_t)((g->sThumbRY >> 8) & 0xFF);
+     pad_script_apply(pad, out);
++    pad_touch_apply(pad, out);
+     return 20;
+ }
 diff --git a/src/usb/usb_gamepad.h b/src/usb/usb_gamepad.h
-index 18291d7..e0e9f01 100644
+index 18291d7..bb0a910 100644
 --- a/src/usb/usb_gamepad.h
 +++ b/src/usb/usb_gamepad.h
-@@ -41,6 +41,11 @@ int usb_gamepad_report(int pad, uint8_t *out, int max);
+@@ -36,11 +36,22 @@ int usb_gamepad_control(int pad, const UsbSetup *setup, uint8_t *out, int max);
+ /* Fill in pad `pad`'s 20-byte input report. Returns the byte count written. */
+ int usb_gamepad_report(int pad, uint8_t *out, int max);
+ 
++/* An on-screen pad (Android touch controls) installs this to report as pad 0 on
++ * top of the host's own pad: it ORs its digital bits into report[2], raises the
++ * analog values in report[4..11] and writes the sticks at report[12..19] while
++ * one is held. NULL when nothing is installed. */
++extern void (*volatile xbox_pad_override)(uint8_t *report20);
++
+ /* The address the host assigned pad `pad` with SET_ADDRESS, 0 until it does,
+  * and whether it has been configured. */
  uint8_t usb_gamepad_address(int pad);
  int usb_gamepad_configured(int pad);
  
@@ -8103,10 +8549,10 @@ index 18291d7..e0e9f01 100644
   * XInput pad n and by pad-script steps prefixed "p<n+1>-". */
  #define USB_GAMEPAD_MAX 4
 diff --git a/src/video/CMakeLists.txt b/src/video/CMakeLists.txt
-index 2189a3b..9aa9acf 100644
+index 2189a3b..edf96c4 100644
 --- a/src/video/CMakeLists.txt
 +++ b/src/video/CMakeLists.txt
-@@ -3,12 +3,28 @@ add_library(xbox_video STATIC
+@@ -3,12 +3,32 @@ add_library(xbox_video STATIC
      video_player.c
      video_pump.c
      fb_present.c
@@ -8117,6 +8563,10 @@ index 2189a3b..9aa9acf 100644
 +    target_sources(xbox_video PRIVATE fb_present_web.c)
 +elseif(NOT WIN32)
 +    target_sources(xbox_video PRIVATE fb_present_sdl.c)
++endif()
++if(ANDROID)
++    # On-screen controls, drawn by the SDL presenter.
++    target_sources(xbox_video PRIVATE touch_pad.c)
 +endif()
  target_include_directories(xbox_video PUBLIC
      ${CMAKE_CURRENT_SOURCE_DIR}
@@ -8136,8 +8586,90 @@ index 2189a3b..9aa9acf 100644
 -    target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32)
 +    target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32 d3d11 dxgi)
  endif()
+diff --git a/src/video/fb_gamma.c b/src/video/fb_gamma.c
+new file mode 100644
+index 0000000..165eab0
+--- /dev/null
++++ b/src/video/fb_gamma.c
+@@ -0,0 +1,76 @@
++/* The display's gamma ramp.
++ *
++ * Xbox D3D (SetGammaRamp; SSX 3's sub_00239B76) loads 256 R, G and B entries
++ * into the NV2A's VGA palette (PRMDIO 0x6813C8 index, 0x6813C9 data, three
++ * writes per entry), and the RAMDAC looks every scanned-out pixel up in it.
++ * The emulated MMIO keeps no such table, so a title calls
++ * xbox_FramebufferSetGammaRamp with the ramp it uploads and the presenters
++ * apply it to the finished frame -- without it the picture is shown with a
++ * linear ramp, lighter and flatter than on the console.
++ * RECOMP_GAMMA=0 ignores the title's ramp. */
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static uint8_t s_lut[3][256];
++static volatile int s_lut_on;
++static volatile unsigned s_lut_serial;     /* +1 per change, for the GPU presenter */
++
++void xbox_FramebufferSetGammaRamp(const uint8_t *r, const uint8_t *g, const uint8_t *b)
++{
++    static int allowed = -1, said;
++    int i, identity = 1;
++    if (allowed < 0) {
++        const char *e = getenv("RECOMP_GAMMA");
++        allowed = !(e && *e == '0');
++    }
++    for (i = 0; i < 256; i++)
++        if (r[i] != i || g[i] != i || b[i] != i)
++            identity = 0;
++    if (!allowed || identity) {
++        s_lut_on = 0;
++        s_lut_serial++;
++        return;
++    }
++    memcpy(s_lut[0], r, 256);
++    memcpy(s_lut[1], g, 256);
++    memcpy(s_lut[2], b, 256);
++    s_lut_on = 1;
++    s_lut_serial++;
++    if (said < 4) {
++        said++;
++        fprintf(stderr, "[GAMMA] ramp loaded: r 0->%u 64->%u 128->%u 192->%u 255->%u"
++                " (g 128->%u, b 128->%u)\n", r[0], r[64], r[128], r[192], r[255], g[128], b[128]);
++    }
++}
++
++/* Apply the ramp to n X8R8G8B8 pixels in place (no-op without one). */
++void xbox_FramebufferApplyGamma(uint32_t *px, size_t n)
++{
++    size_t i;
++    if (!s_lut_on)
++        return;
++    for (i = 0; i < n; i++) {
++        uint32_t c = px[i];
++        px[i] = (c & 0xFF000000u) | ((uint32_t)s_lut[0][(c >> 16) & 0xFF] << 16)
++              | ((uint32_t)s_lut[1][(c >> 8) & 0xFF] << 8) | s_lut[2][c & 0xFF];
++    }
++}
++
++/* The ramp as 256 B8G8R8A8 texels (identity without one), for a presenter
++ * that applies it on the GPU; returns its change serial. */
++unsigned xbox_FramebufferGammaTexels(uint32_t *out256)
++{
++    int i;
++    for (i = 0; i < 256; i++)
++        out256[i] = s_lut_on ? 0xFF000000u | (uint32_t)s_lut[0][i] << 16
++                               | (uint32_t)s_lut[1][i] << 8 | s_lut[2][i]
++                             : 0xFF000000u | (uint32_t)i * 0x010101u;
++    return s_lut_serial;
++}
++
++unsigned xbox_FramebufferGammaSerial(void)
++{
++    return s_lut_serial;
++}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 08bae4b..6c1bcb6 100644
+index 08bae4b..4283c16 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
 @@ -15,12 +15,15 @@
@@ -8600,7 +9132,7 @@ index 08bae4b..6c1bcb6 100644
              line[x * 3 + 0] = (uint8_t)(src[x] & 0xFF);
              line[x * 3 + 1] = (uint8_t)((src[x] >> 8) & 0xFF);
              line[x * 3 + 2] = (uint8_t)((src[x] >> 16) & 0xFF);
-@@ -250,12 +604,146 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -250,12 +604,155 @@ int xbox_FramebufferDumpBmp(const char *path)
          fwrite(line, 1, row, f);
      }
      free(line);
@@ -8614,6 +9146,15 @@ index 08bae4b..6c1bcb6 100644
      return 0;
  }
  
++
++/* The frame the window is showing, for the title's own diagnostics (SSX 3
++ * takes one for its player mark). The Windows/D3D11 presenter shows one frame at a time, so this
++ * is the same image its dump entry point writes. */
++void xbox_FramebufferSnapshot(const char *path)
++{
++    (void)xbox_FramebufferDumpBmp(path);
++}
++
 +/* RECOMP_SNAP_TRIGGER=<file>: when the file appears, write the frame being
 + * shown to the BMP path it contains and delete it. Screenshots taken from
 + * inside work whatever presents the frame -- PrintWindow cannot read a D3D11
@@ -8749,7 +9290,7 @@ index 08bae4b..6c1bcb6 100644
  static DWORD WINAPI fb_thread(LPVOID unused)
  {
      HWND hwnd;
-@@ -274,18 +762,56 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -274,18 +771,56 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
@@ -8813,7 +9354,7 @@ index 08bae4b..6c1bcb6 100644
  
      memset(&bi, 0, sizeof(bi));
      bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
-@@ -299,6 +825,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -299,6 +834,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
  
      fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
              s_fb_width, s_fb_height);
@@ -8824,7 +9365,7 @@ index 08bae4b..6c1bcb6 100644
  
      while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
          MSG msg;
-@@ -306,7 +836,42 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -306,7 +845,42 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              TranslateMessage(&msg);
              DispatchMessageA(&msg);
          }
@@ -8868,7 +9409,7 @@ index 08bae4b..6c1bcb6 100644
              /* A finished frame, published by the flip. Copied into s_rgb so
               * the dump path and GDI see one consistent image even if the
               * next flip lands mid-blit. */
-@@ -314,19 +879,28 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -314,19 +888,28 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              if (s_present[idx])
                  memcpy(s_rgb, s_present[idx],
                         (size_t)s_fb_width * s_fb_height * 4);
@@ -8903,7 +9444,7 @@ index 08bae4b..6c1bcb6 100644
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -357,6 +931,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -357,6 +940,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              if (now - t0 >= 1000) {
                  LONG f = s_flips;
                  wchar_t tb[128];
@@ -8914,7 +9455,7 @@ index 08bae4b..6c1bcb6 100644
                  _snwprintf(tb, 127, L"%ls | FPS: %.1f | draws: %ld", s_title,
                             t0 ? (f - f0) * 1000.0 / (now - t0) : 0.0,
                             (long)s_frame_draws);
-@@ -365,9 +943,12 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -365,9 +952,12 @@ static DWORD WINAPI fb_thread(LPVOID unused)
                  t0 = now; f0 = f;
              }
          }
@@ -8928,7 +9469,7 @@ index 08bae4b..6c1bcb6 100644
      ReleaseDC(hwnd, hdc);
      DestroyWindow(hwnd);
      free(s_rgb);
-@@ -390,11 +971,4 @@ void xbox_FramebufferWindowStart(void)
+@@ -390,11 +980,4 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  
@@ -8940,6 +9481,2204 @@ index 08bae4b..6c1bcb6 100644
 -void xbox_FramebufferWindowSetTitle(const uint16_t *n, int m) { (void)n; (void)m; }
 -void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
  #endif
+diff --git a/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
+new file mode 100644
+index 0000000..da6124f
+--- /dev/null
++++ b/src/video/fb_present_sdl.c
+@@ -0,0 +1,549 @@
++/**
++ * POSIX counterpart of fb_present.c: show the guest framebuffer in an SDL2
++ * window. Same contract (RECOMP_FB_WINDOW, flip-time copy, BMP dump, snap
++ * trigger, keyboard state), minus the D3D11 presenter.
++ */
++#include <stdint.h>
++
++#if !defined(_WIN32)
++#define _GNU_SOURCE
++#include <SDL2/SDL.h>
++#if defined(__ANDROID__)
++#include "touch_pad.h"
++#endif
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stddef.h>
++#include <time.h>
++void xbox_FramebufferApplyGamma(uint32_t *px, size_t n);   /* fb_gamma.c */
++#include <unistd.h>
++
++extern ptrdiff_t xbox_GetMemoryOffset(void);
++
++static volatile int  s_fb_running;
++static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
++static uint32_t     *s_rgb;
++static uint32_t     *s_present[2];
++static volatile int  s_present_idx = -1;
++static volatile unsigned char s_key_down[256];
++static int           s_key_presses[256];
++static char          s_title[48] = "Xbox Recomp";
++static volatile int  s_flips, s_frame_draws;
++
++/* The window's client area in pixels (see fb_present.c). */
++static volatile int s_client_w, s_client_h;
++
++int xbox_FramebufferClientSize(int *w, int *h)
++{
++    int cw = __atomic_load_n(&s_client_w, __ATOMIC_RELAXED);
++    int ch = __atomic_load_n(&s_client_h, __ATOMIC_RELAXED);
++    if (cw <= 0 || ch <= 0)
++        return 0;
++    *w = cw; *h = ch;
++    return 1;
++}
++
++void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
++{
++    const char *pin = getenv("RECOMP_FB_VA");
++
++    s_fb_va = pin ? (uint32_t)strtoul(pin, NULL, 0) : fb_va;
++    if (pitch)
++        s_fb_pitch = pitch;
++}
++
++static void fb_convert_row(const uint8_t *row, uint32_t *dst, uint32_t bpp)
++{
++    uint32_t x;
++
++    if (bpp == 4) {
++        memcpy(dst, row, (size_t)s_fb_width * 4);
++    } else if (bpp == 2) {
++        const uint16_t *p = (const uint16_t *)row;
++        for (x = 0; x < s_fb_width; x++) {
++            uint16_t v = p[x];
++            uint32_t r = (uint32_t)((v >> 11) & 0x1F) * 255u / 31u;
++            uint32_t g = (uint32_t)((v >>  5) & 0x3F) * 255u / 63u;
++            uint32_t b = (uint32_t)( v        & 0x1F) * 255u / 31u;
++            dst[x] = (r << 16) | (g << 8) | b;
++        }
++    } else {
++        memset(dst, 0, (size_t)s_fb_width * 4);
++    }
++}
++
++/* A GPU backend's own full-resolution frame (Vulkan, RECOMP_RES): shown
++ * instead of the guest surface while it keeps coming. */
++static pthread_mutex_t s_hi_lock = PTHREAD_MUTEX_INITIALIZER;
++static uint32_t *s_hi;
++static uint32_t  s_hi_w, s_hi_h;
++static int       s_hi_new;
++static double    s_hi_at;
++
++static double now_ms(void);
++
++void xbox_FramebufferPublishImage(const uint32_t *px, uint32_t w, uint32_t h)
++{
++    if (!px || !w || !h)
++        return;
++    pthread_mutex_lock(&s_hi_lock);
++    if (w != s_hi_w || h != s_hi_h) {
++        free(s_hi);
++        s_hi = (uint32_t *)malloc((size_t)w * h * 4);
++        s_hi_w = s_hi ? w : 0;
++        s_hi_h = s_hi ? h : 0;
++    }
++    if (s_hi) {
++        memcpy(s_hi, px, (size_t)w * h * 4);
++        s_hi_new = 1;
++        s_hi_at = now_ms();
++    }
++    pthread_mutex_unlock(&s_hi_lock);
++}
++
++/* Called by the pushbuffer executor when the title flips. */
++
++void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
++{
++    const uint8_t *src;
++    int next;
++    uint32_t bpp, y;
++
++    if (!s_fb_running || !fb_va || !pitch)
++        return;
++    if (getenv("RECOMP_FB_VA"))
++        return;
++    next = (s_present_idx == 0) ? 1 : 0;
++    if (!s_present[next]) {
++        s_present[next] = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
++        if (!s_present[next])
++            return;
++    }
++    bpp = pitch / s_fb_width;
++    src = (const uint8_t *)((uintptr_t)fb_va + xbox_GetMemoryOffset());
++    for (y = 0; y < s_fb_height; y++)
++        fb_convert_row(src + (size_t)y * pitch,
++                       s_present[next] + (size_t)y * s_fb_width, bpp);
++    __atomic_store_n(&s_present_idx, next, __ATOMIC_RELEASE);
++}
++
++void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
++{
++    int i;
++
++    for (i = 0; i < max_chars && i < 47 && name[i]; i++)
++        s_title[i] = (char)name[i];
++    if (i)
++        s_title[i] = 0;
++}
++
++static double now_ms(void)
++{
++    struct timespec ts;
++
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
++}
++
++static int cmp_double(const void *a, const void *b)
++{
++    double x = *(const double *)a, y = *(const double *)b;
++    return x < y ? -1 : x > y;
++}
++
++/* RECOMP_FRAME_STATS=1: [FRAMES] line once a second, as on Windows. */
++void xbox_FramebufferWindowFrameStats(uint32_t draws)
++{
++    static int on = -1;
++    static double last, window, dt[2048];
++    static int n;
++    double t;
++
++    __atomic_fetch_add(&s_flips, 1, __ATOMIC_RELAXED);
++    s_frame_draws = (int)draws;
++    if (on < 0) {
++        const char *e = getenv("RECOMP_FRAME_STATS");
++        on = e && *e && *e != '0';
++    }
++    if (!on)
++        return;
++    t = now_ms();
++    if (last && n < (int)(sizeof dt / sizeof dt[0]))
++        dt[n++] = t - last;
++    last = t;
++    if (!window)
++        window = t;
++    if (t - window >= 1000.0 && n) {
++        double secs = (t - window) / 1000.0;
++        qsort(dt, (size_t)n, sizeof dt[0], cmp_double);
++        fprintf(stderr, "[FRAMES] n %d fps %.1f p50 %.1f p99 %.1f max %.1f ms draws %u\n",
++                n, n / secs, dt[n / 2],
++                dt[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1], dt[n - 1], draws);
++        n = 0;
++        window = t;
++    }
++}
++
++int xbox_FramebufferKeyDown(int vk)
++{
++    if ((unsigned)vk > 255)
++        return 0;
++    return s_key_down[vk] != 0;
++}
++
++int xbox_FramebufferKeyPresses(int vk)
++{
++    if ((unsigned)vk > 255)
++        return 0;
++    return __atomic_exchange_n(&s_key_presses[vk], 0, __ATOMIC_ACQ_REL);
++}
++
++/* SDL keycode -> Windows virtual-key code, for the keyboard pad stand-in. */
++static int sdl_to_vk(SDL_Keycode k)
++{
++    if (k >= 'a' && k <= 'z') return k - 'a' + 0x41;
++    if (k >= '0' && k <= '9') return k;
++    if (k >= SDLK_F1 && k <= SDLK_F12) return 0x70 + (k - SDLK_F1);
++    if (k >= SDLK_KP_1 && k <= SDLK_KP_9) return 0x61 + (k - SDLK_KP_1);
++    switch (k) {
++    case SDLK_KP_0: return 0x60;
++    case SDLK_RETURN: return 0x0D;   case SDLK_ESCAPE: return 0x1B;
++    case SDLK_SPACE: return 0x20;    case SDLK_TAB: return 0x09;
++    case SDLK_BACKSPACE: return 0x08;
++    case SDLK_LEFT: return 0x25;     case SDLK_UP: return 0x26;
++    case SDLK_RIGHT: return 0x27;    case SDLK_DOWN: return 0x28;
++    case SDLK_LSHIFT: case SDLK_RSHIFT: return 0x10;
++    case SDLK_LCTRL: case SDLK_RCTRL: return 0x11;
++    case SDLK_LALT: case SDLK_RALT: return 0x12;
++    case SDLK_COMMA: return 0xBC;    case SDLK_PERIOD: return 0xBE;
++    case SDLK_MINUS: return 0xBD;    case SDLK_EQUALS: return 0xBB;
++    case SDLK_DELETE: return 0x2E;   case SDLK_HOME: return 0x24;
++    case SDLK_END: return 0x23;      case SDLK_PAGEUP: return 0x21;
++    case SDLK_PAGEDOWN: return 0x22; case SDLK_INSERT: return 0x2D;
++    default: return 0;
++    }
++}
++
++static int s_dump_quiet;
++
++/* px: w*h pixels, 0xAARRGGBB, top row first. */
++static int write_bmp(const char *path, const uint32_t *px, uint32_t w, uint32_t h)
++{
++    FILE *f;
++    uint32_t row = ((w * 3u) + 3u) & ~3u;
++    uint32_t img = row * h, total = 54u + img, y, x;
++    uint8_t hdr[54], *line;
++
++    f = fopen(path, "wb");
++    if (!f)
++        return -1;
++    memset(hdr, 0, sizeof(hdr));
++    hdr[0] = 'B'; hdr[1] = 'M';
++    memcpy(hdr + 2, &total, 4);
++    hdr[10] = 54; hdr[14] = 40;
++    memcpy(hdr + 18, &w, 4);
++    memcpy(hdr + 22, &h, 4);
++    hdr[26] = 1; hdr[28] = 24;
++    memcpy(hdr + 34, &img, 4);
++    fwrite(hdr, 1, sizeof(hdr), f);
++    line = (uint8_t *)calloc(1, row);
++    for (y = 0; y < h; y++) {
++        const uint32_t *src = px + (size_t)(h - 1 - y) * w;
++        for (x = 0; x < w; x++) {
++            line[x * 3 + 0] = (uint8_t)(src[x] & 0xFF);
++            line[x * 3 + 1] = (uint8_t)((src[x] >> 8) & 0xFF);
++            line[x * 3 + 2] = (uint8_t)((src[x] >> 16) & 0xFF);
++        }
++        fwrite(line, 1, row, f);
++    }
++    free(line);
++    fclose(f);
++    return 0;
++}
++
++int xbox_FramebufferDumpBmp(const char *path)
++{
++    if (!s_rgb || !s_fb_va)
++        return -1;
++    if (write_bmp(path, s_rgb, s_fb_width, s_fb_height))
++        return -1;
++    if (!s_dump_quiet)
++        fprintf(stderr, "  [FBWIN] wrote %s (%ux%u from 0x%08X)\n",
++                path, s_fb_width, s_fb_height, s_fb_va);
++    return 0;
++}
++
++/* RECOMP_SNAP_TRIGGER=<file>: when it appears, dump the shown frame to the BMP
++ * path it contains and delete it. hi: the GPU backend's full-resolution frame
++ * when that is what the window shows (s_rgb is not updated then). */
++static void snap_trigger_poll(const uint32_t *hi, uint32_t hi_w, uint32_t hi_h)
++{
++    (void)hi; (void)hi_w; (void)hi_h;   /* the published frame (s_hi) is used */
++    static int checked;
++    static const char *trig;
++    FILE *f;
++    char path[1024];
++    size_t n;
++
++    if (!checked) {
++        checked = 1;
++        trig = getenv("RECOMP_SNAP_TRIGGER");
++    }
++    if (!trig || access(trig, F_OK) != 0)
++        return;
++    f = fopen(trig, "rb");
++    if (!f)
++        return;
++    n = fread(path, 1, sizeof path - 1, f);
++    fclose(f);
++    while (n && (path[n - 1] == '\n' || path[n - 1] == '\r' || path[n - 1] == ' '))
++        n--;
++    path[n] = 0;
++    unlink(trig);
++    if (!n)
++        return;
++    /* The image the window shows: a renderer's published frame (Vulkan, at
++     * the internal resolution and in widescreen) when there is a current
++     * one, else the guest framebuffer, which that renderer leaves unused. */
++    pthread_mutex_lock(&s_hi_lock);
++    if (s_hi && now_ms() - s_hi_at < 250.0) {
++        write_bmp(path, s_hi, s_hi_w, s_hi_h);
++        pthread_mutex_unlock(&s_hi_lock);
++        return;
++    }
++    pthread_mutex_unlock(&s_hi_lock);
++    s_dump_quiet = 1;
++    xbox_FramebufferDumpBmp(path);
++    s_dump_quiet = 0;
++}
++
++/* The frame the window is showing, for the title's own diagnostics (SSX 3
++ * takes one for its player mark). Same choice as the snap trigger: the
++ * renderer's published frame when there is a current one, else the guest
++ * framebuffer, which a GPU renderer leaves unused. */
++void xbox_FramebufferSnapshot(const char *path)
++{
++    int quiet;
++
++    if (!path || !path[0])
++        return;
++    pthread_mutex_lock(&s_hi_lock);
++    if (s_hi && now_ms() - s_hi_at < 250.0) {
++        write_bmp(path, s_hi, s_hi_w, s_hi_h);
++        pthread_mutex_unlock(&s_hi_lock);
++        return;
++    }
++    pthread_mutex_unlock(&s_hi_lock);
++    quiet = s_dump_quiet;
++    s_dump_quiet = 1;
++    (void)xbox_FramebufferDumpBmp(path);
++    s_dump_quiet = quiet;
++}
++
++static void *fb_thread(void *unused)
++{
++    SDL_Window *win;
++    SDL_Renderer *ren;
++    SDL_Texture *tex, *hi_tex = NULL;
++    uint32_t *hi_rgb = NULL, hi_w = 0, hi_h = 0;
++    double t0 = 0;
++    int f0 = 0;
++
++    (void)unused;
++    if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
++        fprintf(stderr, "  [FBWIN] SDL video init failed: %s\n", SDL_GetError());
++        s_fb_running = 0;
++        return NULL;
++    }
++    win = SDL_CreateWindow("SSX 3",
++                           SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
++#if defined(__ANDROID__)
++                           /* The phone's own screen: fullscreen, and the
++                            * renderer scales the published frame to it. */
++                           0, 0,
++                           SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN_DESKTOP);
++#else
++                           (int)s_fb_width, (int)s_fb_height,
++                           SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
++#endif
++
++    ren = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC) : NULL;
++    tex = ren ? SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
++                                  SDL_TEXTUREACCESS_STREAMING,
++                                  (int)s_fb_width, (int)s_fb_height) : NULL;
++    if (!tex) {
++        fprintf(stderr, "  [FBWIN] window setup failed: %s\n", SDL_GetError());
++        s_fb_running = 0;
++        return NULL;
++    }
++    SDL_RenderSetLogicalSize(ren, (int)s_fb_width, (int)s_fb_height);
++#if defined(__ANDROID__)
++    touch_pad_init();
++#endif
++    s_rgb = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height, 4);
++    fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
++            s_fb_width, s_fb_height);
++
++    while (s_fb_running) {
++        SDL_Event e;
++        int idx;
++
++        while (SDL_PollEvent(&e)) {
++            if (e.type == SDL_QUIT) {
++                /* Window close, and SDL turns SIGINT/SIGTERM into this too.
++                 * Closing only the window left the game running and the
++                 * next flip reopened it. */
++                fflush(NULL);
++                _exit(0);
++#if defined(__ANDROID__)
++            } else if (e.type == SDL_FINGERDOWN || e.type == SDL_FINGERMOTION ||
++                       e.type == SDL_FINGERUP || e.type == SDL_MOUSEBUTTONDOWN ||
++                       e.type == SDL_MOUSEBUTTONUP || e.type == SDL_MOUSEMOTION) {
++                touch_pad_event(&e, ren);
++#endif
++            } else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
++                int vk = sdl_to_vk(e.key.keysym.sym);
++                /* RECOMP_KEY_TRACE: each key as it arrives, as in fb_present.c,
++                 * with SDL's name for it -- tells "never reached the window"
++                 * (a desktop shortcut or media key) from "arrived unmapped". */
++                {
++                    static int trace = -1, n;
++                    if (trace < 0)
++                        trace = getenv("RECOMP_KEY_TRACE") != NULL;
++                    if (trace && e.type == SDL_KEYDOWN && !e.key.repeat && n++ < 200) {
++                        fprintf(stderr, "  [KEY] down %s (sym 0x%X) vk=0x%02X\n",
++                                SDL_GetKeyName(e.key.keysym.sym), (unsigned)e.key.keysym.sym, vk);
++                        fflush(stderr);
++                    }
++                }
++                if (vk) {
++                    s_key_down[vk] = e.type == SDL_KEYDOWN;
++                    if (e.type == SDL_KEYDOWN && !e.key.repeat)
++                        __atomic_add_fetch(&s_key_presses[vk], 1, __ATOMIC_RELEASE);
++                }
++            } else if (e.type == SDL_WINDOWEVENT &&
++                       e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
++                memset((void *)s_key_down, 0, sizeof s_key_down);
++            }
++        }
++        if (!(SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED)) {
++            int cw, ch;
++            SDL_GetWindowSize(win, &cw, &ch);
++            __atomic_store_n(&s_client_w, cw, __ATOMIC_RELAXED);
++            __atomic_store_n(&s_client_h, ch, __ATOMIC_RELAXED);
++        }
++        pthread_mutex_lock(&s_hi_lock);
++        if (s_hi && now_ms() - s_hi_at < 250.0) {
++            int fresh = s_hi_new;
++            if (s_hi_w != hi_w || s_hi_h != hi_h) {
++                if (hi_tex) SDL_DestroyTexture(hi_tex);
++                free(hi_rgb);
++                hi_w = s_hi_w; hi_h = s_hi_h;
++                hi_rgb = (uint32_t *)malloc((size_t)hi_w * hi_h * 4);
++                hi_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
++                                           SDL_TEXTUREACCESS_STREAMING, (int)hi_w, (int)hi_h);
++                SDL_RenderSetLogicalSize(ren, (int)hi_w, (int)hi_h);
++                fresh = 1;
++            }
++            if (fresh && hi_rgb)
++                memcpy(hi_rgb, s_hi, (size_t)hi_w * hi_h * 4);
++            s_hi_new = 0;
++            pthread_mutex_unlock(&s_hi_lock);
++            if (hi_tex && hi_rgb) {
++                if (fresh) {
++                    xbox_FramebufferApplyGamma(hi_rgb, (size_t)hi_w * hi_h);
++                    SDL_UpdateTexture(hi_tex, NULL, hi_rgb, (int)(hi_w * 4));
++                }
++                SDL_RenderClear(ren);
++                SDL_RenderCopy(ren, hi_tex, NULL, NULL);
++#if defined(__ANDROID__)
++                touch_pad_render(ren);
++#endif
++                SDL_RenderPresent(ren);
++                snap_trigger_poll(hi_rgb, hi_w, hi_h);
++                goto shown;
++            }
++        } else {
++            pthread_mutex_unlock(&s_hi_lock);
++            if (hi_tex) {
++                SDL_DestroyTexture(hi_tex);
++                hi_tex = NULL;
++                hi_w = hi_h = 0;
++                SDL_RenderSetLogicalSize(ren, (int)s_fb_width, (int)s_fb_height);
++            }
++        }
++        idx = __atomic_load_n(&s_present_idx, __ATOMIC_ACQUIRE);
++        if (idx >= 0 && s_present[idx])
++            memcpy(s_rgb, s_present[idx], (size_t)s_fb_width * s_fb_height * 4);
++        else if (s_fb_va && s_fb_pitch) {
++            const uint8_t *src = (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
++            uint32_t y;
++            for (y = 0; y < s_fb_height; y++)
++                fb_convert_row(src + (size_t)y * s_fb_pitch,
++                               s_rgb + (size_t)y * s_fb_width,
++                               s_fb_pitch / s_fb_width);
++        }
++        xbox_FramebufferApplyGamma(s_rgb, (size_t)s_fb_width * s_fb_height);
++        SDL_UpdateTexture(tex, NULL, s_rgb, (int)(s_fb_width * 4));
++        SDL_RenderClear(ren);
++        SDL_RenderCopy(ren, tex, NULL, NULL);
++#if defined(__ANDROID__)
++        touch_pad_render(ren);
++#endif
++        SDL_RenderPresent(ren);
++        snap_trigger_poll(NULL, 0, 0);
++shown:
++        {
++            double now = now_ms();
++            if (now - t0 >= 1000.0) {
++                int f = s_flips;
++                char tb[128];
++                snprintf(tb, sizeof tb, "%s | FPS: %.1f | draws: %d", s_title,
++                         t0 ? (f - f0) * 1000.0 / (now - t0) : 0.0, s_frame_draws);
++                SDL_SetWindowTitle(win, tb);
++                t0 = now; f0 = f;
++            }
++        }
++    }
++    if (hi_tex) SDL_DestroyTexture(hi_tex);
++    free(hi_rgb);
++    SDL_DestroyTexture(tex);
++    SDL_DestroyRenderer(ren);
++    SDL_DestroyWindow(win);
++    return NULL;
++}
++
++void xbox_FramebufferWindowStart(void)
++{
++    pthread_t th;
++
++    if (!getenv("RECOMP_FB_WINDOW"))
++        return;
++#if defined(__ANDROID__)
++    /* SDL video belongs to the thread SDLActivity started (the one running
++     * SDL_main), and the game runs on its own thread there: the loop is run
++     * by xbox_FramebufferWindowRunHere() instead of a thread of ours. */
++    return;
++#else
++    if (__sync_val_compare_and_swap(&s_fb_running, 0, 1) != 0)
++        return;
++    if (pthread_create(&th, NULL, fb_thread, NULL) == 0)
++        pthread_detach(th);
++    else
++        s_fb_running = 0;
++#endif
++}
++
++#if defined(__ANDROID__)
++/* Run the window/event/blit loop on the calling thread (src/android/
++ * sdl_main.c calls this from SDL_main's thread after starting the game). */
++void xbox_FramebufferWindowRunHere(void)
++{
++    s_fb_running = 1;
++    fb_thread(NULL);
++}
++#endif
++
++#endif /* !_WIN32 */
+diff --git a/src/video/fb_present_web.c b/src/video/fb_present_web.c
+new file mode 100644
+index 0000000..2b124ba
+--- /dev/null
++++ b/src/video/fb_present_web.c
+@@ -0,0 +1,277 @@
++/**
++ * Browser counterpart of fb_present_sdl.c: the guest framebuffer for a page.
++ *
++ * There is no window thread. At each flip the executor converts the guest
++ * surface into one of two RGBA buffers (canvas byte order, gamma applied);
++ * the page's requestAnimationFrame loop asks web_frame() for the newest one
++ * and copies it into its canvas. Keys come from the page through web_key().
++ * Same contract otherwise: RECOMP_FB_WINDOW, frame stats, BMP dump,
++ * xbox_FramebufferKeyDown.
++ */
++#include <stdint.h>
++
++#if defined(__EMSCRIPTEN__)
++#include <emscripten.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stddef.h>
++#include <time.h>
++#include <unistd.h>
++void xbox_FramebufferApplyGamma(uint32_t *px, size_t n);   /* fb_gamma.c */
++extern void *xbox_GuestToHost(uint32_t va);                 /* xbox_memory_layout.c */
++
++static volatile int  s_fb_running;
++static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
++static uint32_t     *s_present[2];
++static volatile int  s_present_idx = -1;
++static volatile uint32_t s_present_seq;
++static volatile unsigned char s_key_down[256];
++static char          s_title[48] = "Xbox Recomp";
++static volatile int  s_flips, s_frame_draws;
++static volatile int  s_client_w, s_client_h;
++
++int xbox_FramebufferClientSize(int *w, int *h)
++{
++    int cw = __atomic_load_n(&s_client_w, __ATOMIC_RELAXED);
++    int ch = __atomic_load_n(&s_client_h, __ATOMIC_RELAXED);
++    if (cw <= 0 || ch <= 0)
++        return 0;
++    *w = cw; *h = ch;
++    return 1;
++}
++
++void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
++{
++    const char *pin = getenv("RECOMP_FB_VA");
++
++    s_fb_va = pin ? (uint32_t)strtoul(pin, NULL, 0) : fb_va;
++    if (pitch)
++        s_fb_pitch = pitch;
++}
++
++/* Guest row (X8R8G8B8 or R5G6B5) -> 0xAARRGGBB words. */
++static void fb_convert_row(const uint8_t *row, uint32_t *dst, uint32_t bpp)
++{
++    uint32_t x;
++
++    if (bpp == 4) {
++        memcpy(dst, row, (size_t)s_fb_width * 4);
++    } else if (bpp == 2) {
++        const uint16_t *p = (const uint16_t *)row;
++        for (x = 0; x < s_fb_width; x++) {
++            uint16_t v = p[x];
++            uint32_t r = (uint32_t)((v >> 11) & 0x1F) * 255u / 31u;
++            uint32_t g = (uint32_t)((v >>  5) & 0x3F) * 255u / 63u;
++            uint32_t b = (uint32_t)( v        & 0x1F) * 255u / 31u;
++            dst[x] = (r << 16) | (g << 8) | b;
++        }
++    } else {
++        memset(dst, 0, (size_t)s_fb_width * 4);
++    }
++}
++
++/* 0xAARRGGBB words -> R,G,B,255 bytes, the canvas's ImageData order. */
++static void to_canvas_order(uint32_t *px, size_t n)
++{
++    size_t i;
++    for (i = 0; i < n; i++) {
++        uint32_t v = px[i];
++        px[i] = 0xFF000000u | ((v & 0xFFu) << 16) | (v & 0xFF00u) | ((v >> 16) & 0xFFu);
++    }
++}
++
++void xbox_FramebufferPublishImage(const uint32_t *px, uint32_t w, uint32_t h)
++{
++    (void)px; (void)w; (void)h;
++}
++
++/* Called by the pushbuffer executor when the title flips. */
++void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
++{
++    const uint8_t *src;
++    int next;
++    uint32_t bpp, y;
++    size_t n = (size_t)s_fb_width * s_fb_height;
++
++    static int gpu = -1;
++
++    if (!s_fb_running || !fb_va || !pitch)
++        return;
++    if (gpu < 0)        /* the page's WebGPU renderer shows its frames itself */
++        gpu = getenv("RECOMP_WEBGPU") != NULL && !(getenv("RECOMP_GPU") && *getenv("RECOMP_GPU") == 's');
++    if (gpu || getenv("RECOMP_FB_VA"))
++        return;
++    next = (s_present_idx == 0) ? 1 : 0;
++    if (!s_present[next]) {
++        s_present[next] = (uint32_t *)calloc(n, 4);
++        if (!s_present[next])
++            return;
++    }
++    bpp = pitch / s_fb_width;
++    src = (const uint8_t *)xbox_GuestToHost(fb_va);
++    for (y = 0; y < s_fb_height; y++)
++        fb_convert_row(src + (size_t)y * pitch,
++                       s_present[next] + (size_t)y * s_fb_width, bpp);
++    xbox_FramebufferApplyGamma(s_present[next], n);
++    to_canvas_order(s_present[next], n);
++    __atomic_store_n(&s_present_idx, next, __ATOMIC_RELEASE);
++    __atomic_fetch_add(&s_present_seq, 1, __ATOMIC_RELEASE);
++}
++
++/* For the page, once per animation frame. Out: info[0..4] = width, height,
++ * frame sequence number, flips so far, draws in the last frame. In:
++ * info[6], info[7] = the canvas's display size. Returns the newest frame
++ * (RGBA bytes), or 0 before the first flip. */
++EMSCRIPTEN_KEEPALIVE uint32_t *web_frame(int32_t *info)
++{
++    int idx = __atomic_load_n(&s_present_idx, __ATOMIC_ACQUIRE);
++
++    info[0] = (int32_t)s_fb_width;
++    info[1] = (int32_t)s_fb_height;
++    info[2] = (int32_t)__atomic_load_n(&s_present_seq, __ATOMIC_ACQUIRE);
++    info[3] = s_flips;
++    info[4] = s_frame_draws;
++    if (info[6] > 0 && info[7] > 0) {
++        __atomic_store_n(&s_client_w, info[6], __ATOMIC_RELAXED);
++        __atomic_store_n(&s_client_h, info[7], __ATOMIC_RELAXED);
++    }
++    return idx >= 0 ? s_present[idx] : 0;
++}
++
++void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
++{
++    int i;
++
++    for (i = 0; i < max_chars && i < 47 && name[i]; i++)
++        s_title[i] = (char)name[i];
++    if (i)
++        s_title[i] = 0;
++}
++
++static double now_ms(void)
++{
++    struct timespec ts;
++
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
++}
++
++static int cmp_double(const void *a, const void *b)
++{
++    double x = *(const double *)a, y = *(const double *)b;
++    return x < y ? -1 : x > y;
++}
++
++/* RECOMP_FRAME_STATS=1: [FRAMES] line once a second, as on the other hosts. */
++void xbox_FramebufferWindowFrameStats(uint32_t draws)
++{
++    static int on = -1;
++    static double last, window, dt[2048];
++    static int n;
++    double t;
++
++    __atomic_fetch_add(&s_flips, 1, __ATOMIC_RELAXED);
++    s_frame_draws = (int)draws;
++    if (on < 0) {
++        const char *e = getenv("RECOMP_FRAME_STATS");
++        on = e && *e && *e != '0';
++    }
++    if (!on)
++        return;
++    t = now_ms();
++    if (last && n < (int)(sizeof dt / sizeof dt[0]))
++        dt[n++] = t - last;
++    last = t;
++    if (!window)
++        window = t;
++    if (t - window >= 1000.0 && n) {
++        double secs = (t - window) / 1000.0;
++        qsort(dt, (size_t)n, sizeof dt[0], cmp_double);
++        fprintf(stderr, "[FRAMES] n %d fps %.1f p50 %.1f p99 %.1f max %.1f ms draws %u\n",
++                n, n / secs, dt[n / 2],
++                dt[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1], dt[n - 1], draws);
++        n = 0;
++        window = t;
++    }
++}
++
++int xbox_FramebufferKeyDown(int vk)
++{
++    if ((unsigned)vk > 255)
++        return 0;
++    return s_key_down[vk] != 0;
++}
++
++/* Called from the page with a Windows virtual-key code (web/ maps
++ * KeyboardEvent.code); vk < 0 releases every key (focus lost). */
++EMSCRIPTEN_KEEPALIVE void web_key(int vk, int down)
++{
++    if (vk < 0) {
++        memset((void *)s_key_down, 0, sizeof s_key_down);
++        return;
++    }
++    if (vk < 256)
++        s_key_down[vk] = down != 0;
++}
++
++int xbox_FramebufferDumpBmp(const char *path)
++{
++    FILE *f;
++    uint32_t row = ((s_fb_width * 3u) + 3u) & ~3u;
++    uint32_t img = row * s_fb_height, total = 54u + img, y, x;
++    uint8_t hdr[54], *line;
++    int idx = __atomic_load_n(&s_present_idx, __ATOMIC_ACQUIRE);
++    const uint32_t *px;
++
++    if (idx < 0 || !s_present[idx])
++        return -1;
++    px = s_present[idx];
++    f = fopen(path, "wb");
++    if (!f)
++        return -1;
++    memset(hdr, 0, sizeof(hdr));
++    hdr[0] = 'B'; hdr[1] = 'M';
++    memcpy(hdr + 2, &total, 4);
++    hdr[10] = 54; hdr[14] = 40;
++    memcpy(hdr + 18, &s_fb_width, 4);
++    memcpy(hdr + 22, &s_fb_height, 4);
++    hdr[26] = 1; hdr[28] = 24;
++    memcpy(hdr + 34, &img, 4);
++    fwrite(hdr, 1, sizeof(hdr), f);
++    line = (uint8_t *)calloc(1, row);
++    for (y = 0; y < s_fb_height; y++) {
++        const uint32_t *src = px + (size_t)(s_fb_height - 1 - y) * s_fb_width;
++        for (x = 0; x < s_fb_width; x++) {          /* canvas order R,G,B,A */
++            line[x * 3 + 0] = (uint8_t)((src[x] >> 16) & 0xFF);
++            line[x * 3 + 1] = (uint8_t)((src[x] >> 8) & 0xFF);
++            line[x * 3 + 2] = (uint8_t)(src[x] & 0xFF);
++        }
++        fwrite(line, 1, row, f);
++    }
++    free(line);
++    fclose(f);
++    fprintf(stderr, "  [FBWIN] wrote %s (%ux%u from 0x%08X)\n",
++            path, s_fb_width, s_fb_height, s_fb_va);
++    return 0;
++}
++
++
++/* The frame the window is showing, for the title's own diagnostics (SSX 3
++ * takes one for its player mark). The browser presenter shows one frame at a time, so this
++ * is the same image its dump entry point writes. */
++void xbox_FramebufferSnapshot(const char *path)
++{
++    (void)xbox_FramebufferDumpBmp(path);
++}
++
++void xbox_FramebufferWindowStart(void)
++{
++    if (!getenv("RECOMP_FB_WINDOW"))
++        return;
++    if (__sync_val_compare_and_swap(&s_fb_running, 0, 1) != 0)
++        return;
++    fprintf(stderr, "  [FBWIN] presenting to the page (%ux%u)\n",
++            s_fb_width, s_fb_height);
++}
++#endif /* __EMSCRIPTEN__ */
+diff --git a/src/video/gpu_present.c b/src/video/gpu_present.c
+new file mode 100644
+index 0000000..7b3408b
+--- /dev/null
++++ b/src/video/gpu_present.c
+@@ -0,0 +1,381 @@
++/*
++ * D3D11 presentation for the framebuffer window (ROADMAP Phase 2.1).
++ *
++ * The window used to show each frame with GDI (StretchDIBits on a 16 ms
++ * timer). This puts a D3D11 device and a swap chain on the same window and
++ * presents the flipped frame through it, vsync-paced. The frame (the guest's
++ * A8R8G8B8, i.e. B8G8R8A8 in memory order) is uploaded into its own texture
++ * and drawn into a back buffer the size of the window's client area,
++ * letterboxed to the frame's aspect ratio on black -- the window can be any
++ * size (or borderless fullscreen, fb_present.c) without stretching the
++ * picture. Linear filtering; RECOMP_PRESENT_FILTER=point for sharp pixels.
++ * RECOMP_D3D_PRESENT=0 keeps GDI; anything that fails falls back to it.
++ */
++#if defined(_WIN32)
++#define COBJMACROS
++#include <windows.h>
++#include <d3d11.h>
++#include <dxgi.h>
++#include <d3dcompiler.h>
++#include <stdio.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include "gpu_present.h"
++
++#pragma comment(lib, "d3d11.lib")
++#pragma comment(lib, "dxgi.lib")
++#pragma comment(lib, "d3dcompiler.lib")
++
++static ID3D11Device             *s_dev;
++static ID3D11DeviceContext      *s_ctx;
++static IDXGISwapChain           *s_chain;
++static ID3D11RenderTargetView   *s_rtv;
++static ID3D11Texture2D          *s_frame;      /* the guest frame, w x h */
++static ID3D11ShaderResourceView *s_srv;
++static ID3D11SamplerState       *s_samp;
++static ID3D11VertexShader       *s_vs;
++static ID3D11PixelShader        *s_ps;
++static ID3D11PixelShader        *s_ps_gamma;   /* + the title's gamma ramp */
++static ID3D11Texture2D          *s_lut;        /* 256 x 1, the ramp (fb_gamma.c) */
++static ID3D11ShaderResourceView *s_lut_srv;
++static unsigned                  s_lut_serial = ~0u;
++static char                      s_capture[MAX_PATH];  /* gpu_present_capture: pending */
++static volatile LONG             s_capture_pending;
++
++/* The next presented image (back buffer: letterbox, overlay and gamma
++ * included -- what the window shows) as a 24-bit BMP. RECOMP_SNAP_PRESENTED=1
++ * routes the snapshot trigger here (fb_present.c). */
++void gpu_present_capture(const char *path)
++{
++    strncpy(s_capture, path, sizeof s_capture - 1);
++    s_capture[sizeof s_capture - 1] = 0;
++    InterlockedExchange(&s_capture_pending, 1);
++}
++
++static void capture_back_buffer(void)
++{
++    ID3D11Texture2D *back = NULL, *stg = NULL;
++    D3D11_TEXTURE2D_DESC td;
++    D3D11_MAPPED_SUBRESOURCE m;
++    FILE *f;
++    if (FAILED(IDXGISwapChain_GetBuffer(s_chain, 0, &IID_ID3D11Texture2D, (void **)&back)))
++        return;
++    ID3D11Texture2D_GetDesc(back, &td);
++    td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++    td.MiscFlags = 0;
++    if (SUCCEEDED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &stg))) {
++        ID3D11DeviceContext_CopyResource(s_ctx, (ID3D11Resource *)stg, (ID3D11Resource *)back);
++        if (SUCCEEDED(ID3D11DeviceContext_Map(s_ctx, (ID3D11Resource *)stg, 0, D3D11_MAP_READ, 0, &m))) {
++            if ((f = fopen(s_capture, "wb")) != NULL) {
++                uint32_t row = (td.Width * 3u + 3u) & ~3u, img = row * td.Height, y, x;
++                uint8_t hdr[54] = {'B', 'M'}, *line = (uint8_t *)calloc(1, row);
++                uint32_t total = 54u + img;
++                memcpy(hdr + 2, &total, 4); hdr[10] = 54; hdr[14] = 40;
++                memcpy(hdr + 18, &td.Width, 4); memcpy(hdr + 22, &td.Height, 4);
++                hdr[26] = 1; hdr[28] = 24; memcpy(hdr + 34, &img, 4);
++                fwrite(hdr, 1, 54, f);
++                for (y = td.Height; line && y-- > 0;) {
++                    const uint8_t *src = (const uint8_t *)m.pData + (size_t)y * m.RowPitch;
++                    for (x = 0; x < td.Width; x++) {
++                        line[x * 3] = src[x * 4]; line[x * 3 + 1] = src[x * 4 + 1];
++                        line[x * 3 + 2] = src[x * 4 + 2];
++                    }
++                    fwrite(line, 1, row, f);
++                }
++                free(line);
++                fclose(f);
++            }
++            ID3D11DeviceContext_Unmap(s_ctx, (ID3D11Resource *)stg, 0);
++        }
++        ID3D11Texture2D_Release(stg);
++    }
++    ID3D11Texture2D_Release(back);
++}
++static HWND                      s_hwnd;
++static uint32_t                  s_w, s_h;      /* frame size */
++static uint32_t                  s_bw, s_bh;    /* back buffer (client) size */
++static int                       s_vsync = 1;
++
++/* A triangle covering the viewport, from the vertex id; uv 0..1. */
++static const char s_hlsl[] =
++    "Texture2D t : register(t0); SamplerState s : register(s0);\n"
++    "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
++    "V vs(uint i : SV_VertexID) { V o; float2 q = float2((i << 1) & 2, i & 2);\n"
++    "  o.uv = q; o.p = float4(q * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
++    "float4 ps(V i) : SV_Target { return float4(t.Sample(s, i.uv).rgb, 1); }\n"
++    "Texture2D lut : register(t1);\n"
++    "float4 psg(V i) : SV_Target { int3 c = int3(saturate(t.Sample(s, i.uv).rgb) * 255.0 + 0.5);\n"
++    "  return float4(lut.Load(int3(c.r, 0, 0)).r, lut.Load(int3(c.g, 0, 0)).g,\n"
++    "                lut.Load(int3(c.b, 0, 0)).b, 1); }\n";
++
++int gpu_present_enabled(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("RECOMP_D3D_PRESENT");
++        on = e && *e && *e != '0';
++    }
++    return on;
++}
++
++static void client_size(uint32_t *w, uint32_t *h)
++{
++    RECT r;
++    GetClientRect(s_hwnd, &r);
++    *w = r.right > r.left ? (uint32_t)(r.right - r.left) : 1;
++    *h = r.bottom > r.top ? (uint32_t)(r.bottom - r.top) : 1;
++}
++
++static int make_rtv(void)
++{
++    ID3D11Texture2D *back = NULL;
++    HRESULT hr = IDXGISwapChain_GetBuffer(s_chain, 0, &IID_ID3D11Texture2D, (void **)&back);
++    if (FAILED(hr))
++        return 0;
++    hr = ID3D11Device_CreateRenderTargetView(s_dev, (ID3D11Resource *)back, NULL, &s_rtv);
++    ID3D11Texture2D_Release(back);
++    return SUCCEEDED(hr);
++}
++
++static ID3DBlob *compile(const char *entry, const char *target)
++{
++    ID3DBlob *code = NULL, *err = NULL;
++    HRESULT hr = D3DCompile(s_hlsl, sizeof s_hlsl - 1, "present", NULL, NULL, entry, target,
++                            0, 0, &code, &err);
++    if (FAILED(hr)) {
++        fprintf(stderr, "  [D3D] present shader %s: %s\n", entry,
++                err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "failed");
++        if (err) ID3D10Blob_Release(err);
++        return NULL;
++    }
++    if (err) ID3D10Blob_Release(err);
++    return code;
++}
++
++int gpu_present_init(HWND hwnd, uint32_t width, uint32_t height)
++{
++    DXGI_SWAP_CHAIN_DESC sd;
++    D3D11_TEXTURE2D_DESC td;
++    D3D11_SAMPLER_DESC smp;
++    ID3DBlob *vsb, *psb;
++    HRESULT hr;
++    const char *v = getenv("RECOMP_VSYNC"), *f = getenv("RECOMP_PRESENT_FILTER");
++
++    if (v && v[0] == '0')
++        s_vsync = 0;
++    s_hwnd = hwnd;
++    s_w = width; s_h = height;
++    client_size(&s_bw, &s_bh);
++    ZeroMemory(&sd, sizeof sd);
++    sd.BufferDesc.Width  = s_bw;
++    sd.BufferDesc.Height = s_bh;
++    sd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    sd.SampleDesc.Count  = 1;
++    sd.BufferUsage       = DXGI_USAGE_RENDER_TARGET_OUTPUT;
++    sd.BufferCount       = 1;
++    sd.OutputWindow      = hwnd;
++    sd.Windowed          = TRUE;
++    sd.SwapEffect        = DXGI_SWAP_EFFECT_DISCARD;
++
++    hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
++                                       NULL, 0, D3D11_SDK_VERSION, &sd,
++                                       &s_chain, &s_dev, NULL, &s_ctx);
++    if (FAILED(hr)) {
++        fprintf(stderr, "  [D3D] device/swap chain failed (0x%08lX); staying on GDI\n",
++                (unsigned long)hr);
++        return 0;
++    }
++    {
++        /* Alt+Enter is the window's (borderless fullscreen, fb_present.c),
++         * not DXGI's exclusive mode at 640x480. */
++        IDXGIFactory *fac = NULL;
++        if (SUCCEEDED(IDXGISwapChain_GetParent(s_chain, &IID_IDXGIFactory, (void **)&fac))) {
++            IDXGIFactory_MakeWindowAssociation(fac, hwnd, DXGI_MWA_NO_ALT_ENTER);
++            IDXGIFactory_Release(fac);
++        }
++    }
++    ZeroMemory(&td, sizeof td);
++    td.Width = width; td.Height = height; td.MipLevels = 1; td.ArraySize = 1;
++    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
++    td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
++    ZeroMemory(&smp, sizeof smp);
++    smp.Filter = (f && (f[0] == 'p' || f[0] == 'P')) ? D3D11_FILTER_MIN_MAG_MIP_POINT
++                                                     : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
++    smp.AddressU = smp.AddressV = smp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
++    smp.MaxLOD = D3D11_FLOAT32_MAX;
++    vsb = compile("vs", "vs_4_0");
++    psb = compile("ps", "ps_4_0");
++    {
++        ID3DBlob *pgb = compile("psg", "ps_4_0");
++        D3D11_TEXTURE2D_DESC ld;
++        ZeroMemory(&ld, sizeof ld);
++        ld.Width = 256; ld.Height = 1; ld.MipLevels = 1; ld.ArraySize = 1;
++        ld.Format = DXGI_FORMAT_B8G8R8A8_UNORM; ld.SampleDesc.Count = 1;
++        ld.Usage = D3D11_USAGE_DEFAULT; ld.BindFlags = D3D11_BIND_SHADER_RESOURCE;
++        if (!pgb
++            || FAILED(ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(pgb),
++                                                     ID3D10Blob_GetBufferSize(pgb), NULL, &s_ps_gamma))
++            || FAILED(ID3D11Device_CreateTexture2D(s_dev, &ld, NULL, &s_lut))
++            || FAILED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_lut, NULL, &s_lut_srv))) {
++            /* no GPU gamma: gpu_present_frame_gamma falls back to the CPU */
++            if (s_ps_gamma) { ID3D11PixelShader_Release(s_ps_gamma); s_ps_gamma = NULL; }
++            if (s_lut_srv) { ID3D11ShaderResourceView_Release(s_lut_srv); s_lut_srv = NULL; }
++            if (s_lut) { ID3D11Texture2D_Release(s_lut); s_lut = NULL; }
++        }
++        if (pgb) ID3D10Blob_Release(pgb);
++    }
++    if (!vsb || !psb || !make_rtv()
++        || FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_frame))
++        || FAILED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_frame, NULL, &s_srv))
++        || FAILED(ID3D11Device_CreateSamplerState(s_dev, &smp, &s_samp))
++        || FAILED(ID3D11Device_CreateVertexShader(s_dev, ID3D10Blob_GetBufferPointer(vsb),
++                                                  ID3D10Blob_GetBufferSize(vsb), NULL, &s_vs))
++        || FAILED(ID3D11Device_CreatePixelShader(s_dev, ID3D10Blob_GetBufferPointer(psb),
++                                                 ID3D10Blob_GetBufferSize(psb), NULL, &s_ps))) {
++        fprintf(stderr, "  [D3D] present resources failed; staying on GDI\n");
++        if (vsb) ID3D10Blob_Release(vsb);
++        if (psb) ID3D10Blob_Release(psb);
++        gpu_present_shutdown();
++        return 0;
++    }
++    ID3D10Blob_Release(vsb);
++    ID3D10Blob_Release(psb);
++    fprintf(stderr, "  [D3D] presenting through D3D11 (%ux%u frame, vsync %s, %s filter)\n",
++            width, height, s_vsync ? "on" : "off",
++            smp.Filter == D3D11_FILTER_MIN_MAG_MIP_POINT ? "point" : "linear");
++    return 1;
++}
++
++/* A frame of another size (the renderer's own, higher-resolution image):
++ * the texture is recreated at that size first. */
++static int present_draw(const uint32_t *pixels, int gamma);
++
++int gpu_present_frame_size(const uint32_t *pixels, uint32_t width, uint32_t height)
++{
++    return gpu_present_frame_gamma(pixels, width, height, 0);
++}
++
++/* gamma: apply the title's ramp (fb_gamma.c) in the shader -- for frames
++ * the caller has not already put through xbox_FramebufferApplyGamma. The
++ * pixels are read before this returns. */
++int gpu_present_frame_gamma(const uint32_t *pixels, uint32_t width, uint32_t height, int gamma)
++{
++    if (!s_dev || !width || !height)
++        return 0;
++    if (width != s_w || height != s_h) {
++        D3D11_TEXTURE2D_DESC td;
++        if (s_srv)   { ID3D11ShaderResourceView_Release(s_srv); s_srv = NULL; }
++        if (s_frame) { ID3D11Texture2D_Release(s_frame);        s_frame = NULL; }
++        ZeroMemory(&td, sizeof td);
++        td.Width = width; td.Height = height; td.MipLevels = 1; td.ArraySize = 1;
++        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
++        td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
++        if (FAILED(ID3D11Device_CreateTexture2D(s_dev, &td, NULL, &s_frame))
++            || FAILED(ID3D11Device_CreateShaderResourceView(s_dev, (ID3D11Resource *)s_frame, NULL, &s_srv)))
++            return 0;
++        s_w = width; s_h = height;
++        fprintf(stderr, "  [D3D] frame size now %ux%u\n", width, height);
++    }
++    if (gamma && !s_ps_gamma) {
++        /* no GPU gamma: the CPU pass on a copy (the pixels are the caller's) */
++        extern void xbox_FramebufferApplyGamma(uint32_t *px, size_t n);
++        static uint32_t *tmp;
++        static size_t cap;
++        size_t n = (size_t)width * height;
++        if (cap < n) { free(tmp); tmp = (uint32_t *)malloc(n * 4); cap = tmp ? n : 0; }
++        if (!tmp)
++            return 0;
++        memcpy(tmp, pixels, n * 4);
++        xbox_FramebufferApplyGamma(tmp, n);
++        return present_draw(tmp, 0);
++    }
++    if (gamma) {
++        extern unsigned xbox_FramebufferGammaSerial(void);
++        extern unsigned xbox_FramebufferGammaTexels(uint32_t *out256);
++        if (xbox_FramebufferGammaSerial() != s_lut_serial) {
++            uint32_t t[256];
++            s_lut_serial = xbox_FramebufferGammaTexels(t);
++            ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s_lut, 0, NULL, t, 1024, 0);
++        }
++    }
++    return present_draw(pixels, gamma);
++}
++
++int gpu_present_frame(const uint32_t *pixels)
++{
++    return present_draw(pixels, 0);
++}
++
++/* Returns 0 when nothing was shown: the window is occluded or the display
++ * is off, and Present does not wait for vsync then -- the caller must pace
++ * itself instead of spinning. */
++static int present_draw(const uint32_t *pixels, int gamma)
++{
++    static const float black[4] = {0, 0, 0, 1};
++    D3D11_VIEWPORT vp;
++    uint32_t cw, ch;
++    float sx, sy;
++
++    if (!s_rtv || !pixels)
++        return 0;
++    client_size(&cw, &ch);
++    if (cw != s_bw || ch != s_bh) {
++        /* The window was resized (or went fullscreen): a back buffer its size. */
++        ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 0, NULL, NULL);
++        ID3D11RenderTargetView_Release(s_rtv);
++        s_rtv = NULL;
++        if (FAILED(IDXGISwapChain_ResizeBuffers(s_chain, 0, cw, ch, DXGI_FORMAT_UNKNOWN, 0))
++            || !make_rtv())
++            return 0;
++        s_bw = cw; s_bh = ch;
++    }
++    ID3D11DeviceContext_UpdateSubresource(s_ctx, (ID3D11Resource *)s_frame, 0, NULL,
++                                          pixels, s_w * 4, 0);
++    ID3D11DeviceContext_OMSetRenderTargets(s_ctx, 1, &s_rtv, NULL);
++    ID3D11DeviceContext_ClearRenderTargetView(s_ctx, s_rtv, black);
++    /* The largest rectangle of the frame's shape that fits, centred. */
++    sx = (float)s_bw / (float)s_w;
++    sy = (float)s_bh / (float)s_h;
++    vp.Width = (float)s_w * (sx < sy ? sx : sy);
++    vp.Height = (float)s_h * (sx < sy ? sx : sy);
++    vp.TopLeftX = ((float)s_bw - vp.Width) * 0.5f;
++    vp.TopLeftY = ((float)s_bh - vp.Height) * 0.5f;
++    vp.MinDepth = 0; vp.MaxDepth = 1;
++    ID3D11DeviceContext_RSSetViewports(s_ctx, 1, &vp);
++    ID3D11DeviceContext_IASetPrimitiveTopology(s_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    ID3D11DeviceContext_IASetInputLayout(s_ctx, NULL);
++    ID3D11DeviceContext_VSSetShader(s_ctx, s_vs, NULL, 0);
++    ID3D11DeviceContext_PSSetShader(s_ctx, gamma ? s_ps_gamma : s_ps, NULL, 0);
++    {
++        ID3D11ShaderResourceView *v[2] = {s_srv, s_lut_srv};
++        ID3D11DeviceContext_PSSetShaderResources(s_ctx, 0, gamma ? 2 : 1, v);
++    }
++    ID3D11DeviceContext_PSSetSamplers(s_ctx, 0, 1, &s_samp);
++    ID3D11DeviceContext_Draw(s_ctx, 3, 0);
++    if (s_capture_pending && InterlockedExchange(&s_capture_pending, 0))
++        capture_back_buffer();
++    return IDXGISwapChain_Present(s_chain, (UINT)s_vsync, 0) == S_OK;
++}
++
++void gpu_present_shutdown(void)
++{
++    if (s_ps)    { ID3D11PixelShader_Release(s_ps);           s_ps = NULL; }
++    if (s_ps_gamma) { ID3D11PixelShader_Release(s_ps_gamma);  s_ps_gamma = NULL; }
++    if (s_lut_srv) { ID3D11ShaderResourceView_Release(s_lut_srv); s_lut_srv = NULL; }
++    if (s_lut)   { ID3D11Texture2D_Release(s_lut);            s_lut = NULL; }
++    if (s_vs)    { ID3D11VertexShader_Release(s_vs);          s_vs = NULL; }
++    if (s_samp)  { ID3D11SamplerState_Release(s_samp);        s_samp = NULL; }
++    if (s_srv)   { ID3D11ShaderResourceView_Release(s_srv);   s_srv = NULL; }
++    if (s_frame) { ID3D11Texture2D_Release(s_frame);          s_frame = NULL; }
++    if (s_rtv)   { ID3D11RenderTargetView_Release(s_rtv);     s_rtv = NULL; }
++    if (s_chain) { IDXGISwapChain_Release(s_chain);           s_chain = NULL; }
++    if (s_ctx)   { ID3D11DeviceContext_Release(s_ctx);        s_ctx = NULL; }
++    if (s_dev)   { ID3D11Device_Release(s_dev);               s_dev = NULL; }
++}
++
++int gpu_present_active(void)
++{
++    return s_rtv != NULL;
++}
++#endif
+diff --git a/src/video/gpu_present.h b/src/video/gpu_present.h
+new file mode 100644
+index 0000000..8891786
+--- /dev/null
++++ b/src/video/gpu_present.h
+@@ -0,0 +1,17 @@
++/* D3D11 presentation for the framebuffer window (see gpu_present.c). */
++#ifndef XBOX_GPU_PRESENT_H
++#define XBOX_GPU_PRESENT_H
++#if defined(_WIN32)
++#include <windows.h>
++#include <stdint.h>
++
++int  gpu_present_enabled(void);                 /* RECOMP_D3D_PRESENT=1 */
++int  gpu_present_init(HWND hwnd, uint32_t width, uint32_t height);
++int  gpu_present_frame_gamma(const uint32_t *pixels, uint32_t width, uint32_t height, int gamma); /* gamma: apply the title's ramp on the GPU */
++int  gpu_present_frame(const uint32_t *pixels); /* width*height B8G8R8A8; 0 = not shown (occluded) */
++int  gpu_present_frame_size(const uint32_t *pixels, uint32_t width, uint32_t height);
++int  gpu_present_active(void);
++void gpu_present_capture(const char *path);   /* next presented image -> BMP */
++void gpu_present_shutdown(void);
++#endif
++#endif
+diff --git a/src/video/touch_pad.c b/src/video/touch_pad.c
+new file mode 100644
+index 0000000..9e1c030
+--- /dev/null
++++ b/src/video/touch_pad.c
+@@ -0,0 +1,906 @@
++/* On-screen controls for Android -- see touch_pad.h.
++ *
++ * A port of the "gamepad" touch overlay from LibertyRecompAndroid
++ * (glue/rexglue-sdk-main/gta4-recomp/src/input/gamepad_touch_overlay.cpp): the
++ * same geometry formulas, the same colours and alphas, the same hit rules, the
++ * same floating sticks and dead zone, and the same rule that the overlay only
++ * exists while no real controller is connected.
++ *
++ * Differences, all of them ours:
++ *   - drawn with SDL in window pixels rather than with ImGui in logical ones, so
++ *     the pad sits on the glass and not inside the letterboxed frame;
++ *   - the pad state reaches the title through the XID report the USB gamepad
++ *     path builds (xbox_pad_override), so the guest reads it exactly like a
++ *     physical controller;
++ *   - fingers arrive as SDL_FINGER* events from the presenter's event loop
++ *     rather than being re-read from SDL's touch-device list every frame;
++ *   - the D-pad is one zone that a held finger slides across, so diagonals
++ *     (down+left) are reachable with one thumb, as on the console pad.
++ */
++#include "touch_pad.h"
++
++#if defined(__ANDROID__)
++
++#include <android/log.h>
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "../usb/usb_gamepad.h"   /* xbox_pad_override */
++
++/* Diagnostics go to logcat directly: this file runs on the presenter thread,
++ * whose stderr does not survive the port's log pipe, and "did a controller get
++ * detected" is exactly the thing that needs to be observable on a phone. */
++#define TLOG(...) __android_log_print(ANDROID_LOG_INFO, "SSX3TOUCH", __VA_ARGS__)
++
++/* ---- the look, from gamepad_touch_overlay.cpp ------------------------- */
++
++#define FILL_R   90
++#define FILL_G   90
++#define FILL_B   90
++#define FILL_A   55
++
++#define HELD_R  200
++#define HELD_G  200
++#define HELD_B  200
++#define HELD_A  105
++
++#define RING_R  215
++#define RING_G  215
++#define RING_B  215
++#define RING_A  105
++
++#define LABEL_R 230
++#define LABEL_G 230
++#define LABEL_B 230
++#define LABEL_A 150
++
++#define KNOB_R  225
++#define KNOB_G  225
++#define KNOB_B  225
++#define KNOB_A  130
++
++/* Face buttons carry their letter colour, as the original does. */
++#define FACE_A  { 110, 205,  80, 170 }
++#define FACE_B  { 235,  75,  70, 170 }
++#define FACE_X  {  75, 145, 240, 170 }
++#define FACE_Y  { 245, 205,  50, 170 }
++
++#define SEGMENTS    48
++#define MAX_FINGERS 10
++
++/* ---- controls --------------------------------------------------------- */
++
++enum kind { KIND_STICK, KIND_BUTTON, KIND_TRIGGER, KIND_ARROW };
++
++enum {
++    BTN_NONE = 0,
++    BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT,
++    BTN_START, BTN_BACK,
++    BTN_A, BTN_B, BTN_X, BTN_Y,
++    BTN_LB, BTN_LT, BTN_RB, BTN_RT
++};
++
++typedef struct {
++    int         kind;
++    float       x, y, r;      /* window pixels; a stick's resting place */
++    int         button;
++    int         index;        /* stick 0/1, trigger 0/1, arrow 0..3 */
++    const char *label;
++    SDL_Color   label_color;
++} control;
++
++#define CONTROL_COUNT 16
++
++static const SDL_Color kLabel = { LABEL_R, LABEL_G, LABEL_B, LABEL_A };
++static const float     kDeadZone = 0.12f;
++
++/* ---- state ------------------------------------------------------------ */
++
++static int     s_enabled;         /* the RECOMP_TOUCH_PAD switch */
++static int     s_pad_present;     /* a real controller is connected */
++static int     s_win_w, s_win_h;
++
++static uint8_t s_digital;
++static uint8_t s_analog[8];       /* A B X Y Black White L R */
++static int     s_held[CONTROL_COUNT];
++
++static float   s_stick_x[2], s_stick_y[2];
++static float   s_stick_ox[2], s_stick_oy[2];
++static int     s_stick_owned[2];
++
++typedef struct { SDL_FingerID id; int ctrl; } finger;
++static finger  s_fingers[MAX_FINGERS];
++static int     s_nfingers;
++
++/* The D-pad is one zone, not four buttons: a finger lands on it and then slides
++ * between directions the way a thumb moves across the pad on the console, which
++ * is the only way to hold a diagonal (down+left) with one thumb. Direction
++ * changes are measured from where that finger landed, so a small move is
++ * enough and the finger never has to reach the far arrow. */
++static int     s_dp_id = -1;      /* finger holding the D-pad, -1 = none */
++static float   s_dp_ox, s_dp_oy;  /* where it landed */
++static int     s_dp_bits;         /* 1 up, 2 down, 4 left, 8 right */
++
++#define DPAD_SWITCH 0.042f        /* x window height: move this far to switch */
++
++static SDL_Texture *s_disc;       /* white circle, tinted per use */
++
++/* ---- layout (identical formulas to the original) ---------------------- */
++
++static void build_layout(control *c, float w, float h)
++{
++    size_t n = 0;
++    float lx = 0.12f * w;
++
++    memset(c, 0, sizeof(control) * CONTROL_COUNT);
++
++    /* Sticks first. The right stick has no resting place: it appears where the
++     * camera finger lands. */
++    c[n++] = (control){ KIND_STICK, lx, 0.72f * h, 0.105f * h, BTN_NONE, 0, "L", kLabel };
++    c[n++] = (control){ KIND_STICK, w * 0.75f, 0.60f * h, 0.095f * h, BTN_NONE, 1, "R", kLabel };
++
++    /* D-pad, right of the left stick. */
++    {
++        float dx = lx + 0.26f * h, dy = 0.86f * h, arm = 0.078f * h, dr = 0.042f * h;
++        c[n++] = (control){ KIND_ARROW, dx, dy - arm, dr, BTN_UP, 0, "", kLabel };
++        c[n++] = (control){ KIND_ARROW, dx, dy + arm, dr, BTN_DOWN, 1, "", kLabel };
++        c[n++] = (control){ KIND_ARROW, dx - arm, dy, dr, BTN_LEFT, 2, "", kLabel };
++        c[n++] = (control){ KIND_ARROW, dx + arm, dy, dr, BTN_RIGHT, 3, "", kLabel };
++    }
++
++    /* LT over LB above the left stick. The reference also puts L3 here; SSX 3
++     * binds nothing to a stick click, so the button would be dead. */
++    {
++        float br = 0.048f * h;
++        c[n++] = (control){ KIND_TRIGGER, lx, 0.355f * h, br, BTN_LT, 0, "LT", kLabel };
++        c[n++] = (control){ KIND_BUTTON, lx, 0.475f * h, br, BTN_LB, 0, "LB", kLabel };
++    }
++
++    /* A/B/X/Y diamond in the lower right, with the Xbox 360 letter colours. */
++    {
++        float fx = w - 0.52f * h, fy = 0.80f * h, fs = 0.097f * h, fr = 0.052f * h;
++        SDL_Color a = FACE_A, b = FACE_B, x = FACE_X, y = FACE_Y;
++        c[n++] = (control){ KIND_BUTTON, fx, fy + fs, fr, BTN_A, 0, "A", a };
++        c[n++] = (control){ KIND_BUTTON, fx + fs, fy, fr, BTN_B, 0, "B", b };
++        c[n++] = (control){ KIND_BUTTON, fx - fs, fy, fr, BTN_X, 0, "X", x };
++        c[n++] = (control){ KIND_BUTTON, fx, fy - fs, fr, BTN_Y, 0, "Y", y };
++    }
++
++    /* RT over RB at the right edge (no R3, for the same reason). */
++    {
++        float br = 0.048f * h;
++        float rx = w - 0.17f * h;
++        c[n++] = (control){ KIND_TRIGGER, rx, 0.47f * h, br, BTN_RT, 1, "RT", kLabel };
++        c[n++] = (control){ KIND_BUTTON, rx, 0.59f * h, br, BTN_RB, 0, "RB", kLabel };
++    }
++
++    /* BACK and START in the middle of the top edge. */
++    {
++        float sr = 0.036f * h;
++        c[n++] = (control){ KIND_BUTTON, 0.44f * w, 0.075f * h, sr, BTN_BACK, 0, "BACK", kLabel };
++        c[n++] = (control){ KIND_BUTTON, 0.56f * w, 0.075f * h, sr, BTN_START, 0, "START", kLabel };
++    }
++}
++
++/* ---- drawing ---------------------------------------------------------- */
++
++static SDL_Texture *disc_texture(SDL_Renderer *ren)
++{
++    const int size = 128;
++    SDL_Surface *s;
++    int x, y;
++    SDL_Texture *t;
++
++    if (s_disc)
++        return s_disc;
++    s = SDL_CreateRGBSurfaceWithFormat(0, size, size, 32, SDL_PIXELFORMAT_RGBA32);
++    if (!s)
++        return NULL;
++    SDL_LockSurface(s);
++    for (y = 0; y < size; y++) {
++        Uint32 *row = (Uint32 *)((Uint8 *)s->pixels + y * s->pitch);
++        for (x = 0; x < size; x++) {
++            float dx = (x + 0.5f) - size * 0.5f, dy = (y + 0.5f) - size * 0.5f;
++            float d = sqrtf(dx * dx + dy * dy);
++            float edge = size * 0.5f - 0.5f;
++            float a = (d <= edge) ? 1.0f : (edge + 1.0f - d);
++            if (a < 0.0f) a = 0.0f;
++            if (a > 1.0f) a = 1.0f;
++            row[x] = SDL_MapRGBA(s->format, 255, 255, 255, (Uint8)(a * 255.0f));
++        }
++    }
++    SDL_UnlockSurface(s);
++    t = SDL_CreateTextureFromSurface(ren, s);
++    SDL_FreeSurface(s);
++    if (t)
++        SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
++    s_disc = t;
++    return s_disc;
++}
++
++static void fill_circle(SDL_Renderer *ren, SDL_Texture *disc, float cx, float cy,
++                        float r, SDL_Color col)
++{
++    SDL_FRect dst = { cx - r, cy - r, r * 2.0f, r * 2.0f };
++
++    SDL_SetTextureColorMod(disc, col.r, col.g, col.b);
++    SDL_SetTextureAlphaMod(disc, col.a);
++    SDL_RenderCopyF(ren, disc, NULL, &dst);
++}
++
++/* AddCircle(..., 48): a 48-segment outline, 2.5% of the radius thick. */
++static void ring_circle(SDL_Renderer *ren, float cx, float cy, float r, SDL_Color col)
++{
++    int i;
++    float prev_x = 0.0f, prev_y = 0.0f;
++    float thickness = r * 0.025f < 1.0f ? 1.0f : r * 0.025f;
++
++    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
++    SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, col.a);
++    for (i = 0; i <= SEGMENTS; i++) {
++        float a = (float)i * 6.2831853f / (float)SEGMENTS;
++        float x = cx + r * cosf(a), y = cy + r * sinf(a);
++        if (i) {
++            float dx = x - prev_x, dy = y - prev_y;
++            float len = sqrtf(dx * dx + dy * dy);
++            if (len > 0.0f) {
++                float nx = -dy / len * thickness * 0.5f;
++                float ny = dx / len * thickness * 0.5f;
++                SDL_RenderDrawLineF(ren, prev_x + nx, prev_y + ny, x + nx, y + ny);
++                SDL_RenderDrawLineF(ren, prev_x - nx, prev_y - ny, x - nx, y - ny);
++            }
++        }
++        prev_x = x;
++        prev_y = y;
++    }
++}
++
++static void fill_tri(SDL_Renderer *ren, float ax, float ay, float bx, float by,
++                     float cx, float cy, SDL_Color col)
++{
++    SDL_Vertex v[3];
++
++    memset(v, 0, sizeof v);
++    v[0].position.x = ax; v[0].position.y = ay;
++    v[1].position.x = bx; v[1].position.y = by;
++    v[2].position.x = cx; v[2].position.y = cy;
++    v[0].color = v[1].color = v[2].color = col;
++    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
++    SDL_RenderGeometry(ren, NULL, v, 3, NULL, 0);
++}
++
++/* 5x7 glyphs: just the characters the labels use. */
++static const unsigned char *glyph(char ch)
++{
++    static const unsigned char A[7] = { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 };
++    static const unsigned char B[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E };
++    static const unsigned char C[7] = { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E };
++    static const unsigned char E[7] = { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F };
++    static const unsigned char K[7] = { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 };
++    static const unsigned char L[7] = { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F };
++    static const unsigned char R[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 };
++    static const unsigned char S[7] = { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E };
++    static const unsigned char T[7] = { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 };
++    static const unsigned char X[7] = { 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 };
++    static const unsigned char Y[7] = { 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04 };
++    static const unsigned char N3[7] = { 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E };
++
++    switch (ch) {
++        case 'A': return A;
++        case 'B': return B;
++        case 'C': return C;
++        case 'E': return E;
++        case 'K': return K;
++        case 'L': return L;
++        case 'R': return R;
++        case 'S': return S;
++        case 'T': return T;
++        case 'X': return X;
++        case 'Y': return Y;
++        case '3': return N3;
++        default:  return NULL;
++    }
++}
++
++/* One letter fills most of the circle; longer labels are fitted to its width.
++ * The original picks a font size (0.95r, or at most 0.62r with a width fit);
++ * our glyphs have a cap height of 7 units, so 0.72 of that size is the
++ * comparable scale. */
++static float label_scale(const char *text, float r)
++{
++    size_t len = strlen(text);
++    float size, scale;
++
++    if (len == 1) {
++        size = r * 0.95f;
++    } else {
++        float fit = r * 1.35f / ((float)len * 0.58f);
++        size = r * 0.62f < fit ? r * 0.62f : fit;
++    }
++    scale = size * 0.72f / 7.0f;
++    if (len > 1 && 6.0f * (float)len * scale > 1.45f * r)
++        scale = 1.45f * r / (6.0f * (float)len);
++    return scale;
++}
++
++static void draw_label(SDL_Renderer *ren, const char *text, float cx, float cy,
++                       float r, SDL_Color col)
++{
++    float scale = label_scale(text, r);
++    float w, x0, y0;
++    size_t i;
++    int row, col_i;
++
++    if (scale <= 0.0f)
++        return;
++    w = (6.0f * (float)strlen(text) - 1.0f) * scale;
++    x0 = cx - w * 0.5f;
++    y0 = cy - 3.5f * scale;
++    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
++    SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, col.a);
++    for (i = 0; text[i]; i++) {
++        const unsigned char *g = glyph(text[i]);
++        if (!g)
++            continue;
++        for (row = 0; row < 7; row++) {
++            for (col_i = 0; col_i < 5; col_i++) {
++                if (g[row] & (0x10u >> col_i)) {
++                    SDL_FRect px = { x0 + ((float)i * 6.0f + (float)col_i) * scale,
++                                     y0 + (float)row * scale,
++                                     scale + 0.4f, scale + 0.4f };
++                    SDL_RenderFillRectF(ren, &px);
++                }
++            }
++        }
++    }
++}
++
++static void draw_control(SDL_Renderer *ren, SDL_Texture *disc, const control *c, int held)
++{
++    SDL_Color fill = held ? (SDL_Color){ HELD_R, HELD_G, HELD_B, HELD_A }
++                          : (SDL_Color){ FILL_R, FILL_G, FILL_B, FILL_A };
++    SDL_Color ring = { RING_R, RING_G, RING_B, RING_A };
++
++    if (c->r <= 0.0f)
++        return;
++
++    if (c->kind == KIND_STICK) {
++        float cx = held ? s_stick_ox[c->index] : c->x;
++        float cy = held ? s_stick_oy[c->index] : c->y;
++        float kx, ky;
++
++        /* The camera stick shows only while it is being used. */
++        if (c->index == 1 && !held)
++            return;
++        fill_circle(ren, disc, cx, cy, c->r, fill);
++        ring_circle(ren, cx, cy, c->r, ring);
++        kx = cx + s_stick_x[c->index] * c->r * 0.55f;
++        ky = cy + s_stick_y[c->index] * c->r * 0.55f;
++        fill_circle(ren, disc, kx, ky, c->r * 0.34f,
++                    (SDL_Color){ KNOB_R, KNOB_G, KNOB_B, KNOB_A });
++        return;
++    }
++
++    fill_circle(ren, disc, c->x, c->y, c->r, fill);
++    ring_circle(ren, c->x, c->y, c->r, ring);
++
++    if (c->kind == KIND_ARROW) {
++        float t = c->r * 0.42f;
++        float ax, ay, bx, by, cx2, cy2;
++
++        switch (c->index) {
++            case 0: ax = c->x; ay = c->y - t; bx = c->x - t; by = c->y + t * 0.6f;
++                    cx2 = c->x + t; cy2 = c->y + t * 0.6f; break;
++            case 1: ax = c->x; ay = c->y + t; bx = c->x + t; by = c->y - t * 0.6f;
++                    cx2 = c->x - t; cy2 = c->y - t * 0.6f; break;
++            case 2: ax = c->x - t; ay = c->y; bx = c->x + t * 0.6f; by = c->y + t;
++                    cx2 = c->x + t * 0.6f; cy2 = c->y - t; break;
++            default: ax = c->x + t; ay = c->y; bx = c->x - t * 0.6f; by = c->y - t;
++                    cx2 = c->x - t * 0.6f; cy2 = c->y + t; break;
++        }
++        fill_tri(ren, ax, ay, bx, by, cx2, cy2, kLabel);
++        return;
++    }
++
++    if (c->label && c->label[0])
++        draw_label(ren, c->label, c->x, c->y, c->r, c->label_color);
++}
++
++/* ---- pad state -------------------------------------------------------- */
++
++static int pad_present(void)
++{
++    int n, i;
++
++    if (getenv("RECOMP_TOUCH_FORCE_HIDE"))
++        return 1;   /* diagnostic: prove the hide path without unplugging a pad */
++
++    /* Android SDL2 also reports the accelerometer as a joystick, and it is not
++     * a controller: a controller has buttons, an accelerometer has none, so
++     * that is the test -- it also catches a pad SDL has no mapping for, which
++     * SDL_IsGameController alone would miss. */
++    n = SDL_NumJoysticks();
++    for (i = 0; i < n; i++) {
++        SDL_Joystick *j;
++        int buttons;
++
++        if (SDL_IsGameController(i))
++            return 1;
++        j = SDL_JoystickOpen(i);
++        if (!j)
++            continue;
++        buttons = SDL_JoystickNumButtons(j);
++        SDL_JoystickClose(j);
++        if (buttons >= 4)
++            return 1;
++    }
++    return 0;
++}
++
++static void set_button(int button, int on)
++{
++    static const struct { int button; uint8_t bit; int analog; } map[] = {
++        { BTN_UP,    0x01, -1 }, { BTN_DOWN,  0x02, -1 },
++        { BTN_LEFT,  0x04, -1 }, { BTN_RIGHT, 0x08, -1 },
++        { BTN_START, 0x10, -1 }, { BTN_BACK,  0x20, -1 },
++        { BTN_A,     0x00,  0 }, { BTN_B,     0x00,  1 },
++        { BTN_X,     0x00,  2 }, { BTN_Y,     0x00,  3 },
++        /* The original Xbox pad has analog L/R instead of LB/RB: a bumper
++         * sends the same trigger, fully pressed. */
++        { BTN_LB,    0x00,  6 }, { BTN_LT,    0x00,  6 },
++        { BTN_RB,    0x00,  7 }, { BTN_RT,    0x00,  7 },
++    };
++    size_t i;
++
++    for (i = 0; i < sizeof map / sizeof map[0]; i++) {
++        if (map[i].button != button)
++            continue;
++        if (map[i].bit)
++            s_digital = (uint8_t)(on ? (s_digital | map[i].bit)
++                                     : (s_digital & ~map[i].bit));
++        else
++            s_analog[map[i].analog] = (uint8_t)(on ? 255 : 0);
++        return;
++    }
++}
++
++static void release_all(void)
++{
++    s_digital = 0;
++    memset(s_analog, 0, sizeof s_analog);
++    memset(s_held, 0, sizeof s_held);
++    s_nfingers = 0;
++    s_stick_x[0] = s_stick_x[1] = s_stick_y[0] = s_stick_y[1] = 0.0f;
++    s_stick_owned[0] = s_stick_owned[1] = 0;
++    s_dp_id = -1;
++    s_dp_bits = 0;
++}
++
++static void touch_report(uint8_t *out)
++{
++    int i;
++
++    if (!s_enabled || s_pad_present)
++        return;
++    out[2] |= s_digital;
++    for (i = 0; i < 8; i++)
++        if (s_analog[i] > out[4 + i])
++            out[4 + i] = s_analog[i];
++
++    for (i = 0; i < 2; i++) {
++        float x = s_stick_x[i], y = s_stick_y[i];
++        float len = sqrtf(x * x + y * y);
++        int16_t vx = 0, vy = 0;
++
++        /* Radial dead zone, then rescale so the zone's edge is zero and the rim
++         * is full: the original's mapping, with screen Y inverted. */
++        if (len >= kDeadZone && len > 0.0f) {
++            float t = (len - kDeadZone) / (1.0f - kDeadZone);
++            float scale;
++            if (t > 1.0f) t = 1.0f;
++            scale = t / len;
++            x *= scale;
++            y *= scale;
++            if (x > 1.0f) x = 1.0f;
++            if (x < -1.0f) x = -1.0f;
++            if (y > 1.0f) y = 1.0f;
++            if (y < -1.0f) y = -1.0f;
++            vx = (int16_t)(x * 32767.0f);
++            vy = (int16_t)(-y * 32767.0f);
++        }
++        if (getenv("RECOMP_TOUCH_TRACE")) {
++            /* Only a change worth seeing: what the guest is actually fed when
++             * someone presses a button should stay 0,0. */
++            static int16_t last_x[2], last_y[2];
++            long dx = (long)vx - last_x[i], dy = (long)vy - last_y[i];
++            if (dx > 300 || dx < -300 || dy > 300 || dy < -300) {
++                TLOG("stick %d -> %d,%d", i, (int)vx, (int)vy);
++                last_x[i] = vx;
++                last_y[i] = vy;
++            }
++        }
++        if (!vx && !vy)
++            continue;
++        memcpy(&out[12 + i * 4], &vx, sizeof vx);
++        memcpy(&out[14 + i * 4], &vy, sizeof vy);
++    }
++}
++
++/* ---- touch handling --------------------------------------------------- */
++
++/* ---- the D-pad -------------------------------------------------------- */
++
++static int arrow_index(const control *c, int button)
++{
++    int i;
++
++    for (i = 0; i < CONTROL_COUNT; i++)
++        if (c[i].kind == KIND_ARROW && c[i].button == button)
++            return i;
++    return -1;
++}
++
++static void dpad_apply(const control *c, int bits)
++{
++    static const int order[4] = { BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT };
++    static const char *name[4] = { "up", "down", "left", "right" };
++    int i;
++
++    for (i = 0; i < 4; i++) {
++        int on = (bits >> i) & 1;
++        int idx = arrow_index(c, order[i]);
++
++        if (idx < 0 || s_held[idx] == on)
++            continue;
++        s_held[idx] = on;
++        set_button(order[i], on);
++        if (getenv("RECOMP_TOUCH_TRACE"))
++            TLOG("dpad %s %s", name[i], on ? "on" : "off");
++    }
++}
++
++static void dpad_start(const control *c, float px, float py)
++{
++    float cx = 0.0f, cy = 0.0f, sw = DPAD_SWITCH * (float)s_win_h;
++    int i, n = 0, bits = 0;
++
++    for (i = 0; i < CONTROL_COUNT; i++)
++        if (c[i].kind == KIND_ARROW) {
++            cx += c[i].x;
++            cy += c[i].y;
++            n++;
++        }
++    if (!n)
++        return;
++    cx /= (float)n;
++    cy /= (float)n;
++
++    /* Where it landed on the pad is the first direction, corners included. */
++    if (py - cy <= -sw * 0.6f) bits |= 1;
++    if (py - cy >=  sw * 0.6f) bits |= 2;
++    if (px - cx <= -sw * 0.6f) bits |= 4;
++    if (px - cx >=  sw * 0.6f) bits |= 8;
++
++    s_dp_ox = px;
++    s_dp_oy = py;
++    s_dp_bits = bits;
++    dpad_apply(c, bits);
++}
++
++static void dpad_motion(const control *c, float px, float py)
++{
++    float dx = px - s_dp_ox, dy = py - s_dp_oy;
++    float sw = DPAD_SWITCH * (float)s_win_h;
++    int bits = s_dp_bits;
++
++    if (fabsf(dx) >= sw || fabsf(dy) >= sw) {
++        bits = 0;
++        if (dx <= -sw) bits |= 4; else if (dx >= sw) bits |= 8;
++        if (dy <= -sw) bits |= 1; else if (dy >= sw) bits |= 2;
++    }
++    if (bits != s_dp_bits) {
++        s_dp_bits = bits;
++        dpad_apply(c, bits);
++    }
++}
++
++static void dpad_end(const control *c)
++{
++    dpad_apply(c, 0);
++    s_dp_bits = 0;
++    s_dp_id = -1;
++}
++
++/* The button under a finger, or the stick of that half of the screen. */
++static int hit_test(const control *c, float px, float py, float w)
++{
++    int best = -1, i;
++    float best_distance = 1e30f;
++
++    /* The whole pad is a hit, out to the rim of an arrow and a little past it,
++     * so a thumb sliding across it never falls through to the stick. */
++    {
++        float cx = 0.0f, cy = 0.0f, arm = 0.0f, spread;
++        int n = 0, near = -1;
++        float nearest = 1e30f;
++
++        for (i = 0; i < CONTROL_COUNT; i++)
++            if (c[i].kind == KIND_ARROW) {
++                cx += c[i].x;
++                cy += c[i].y;
++                n++;
++            }
++        if (n) {
++            cx /= (float)n;
++            cy /= (float)n;
++            for (i = 0; i < CONTROL_COUNT; i++) {
++                float dx, dy, d;
++                if (c[i].kind != KIND_ARROW)
++                    continue;
++                dx = c[i].x - cx;
++                dy = c[i].y - cy;
++                d = sqrtf(dx * dx + dy * dy);
++                if (d > arm)
++                    arm = d;
++            }
++            spread = arm * 1.5f;
++            if (fabsf(px - cx) <= spread && fabsf(py - cy) <= spread) {
++                for (i = 0; i < CONTROL_COUNT; i++) {
++                    float dx, dy, d;
++                    if (c[i].kind != KIND_ARROW)
++                        continue;
++                    dx = px - c[i].x;
++                    dy = py - c[i].y;
++                    d = sqrtf(dx * dx + dy * dy);
++                    if (d < nearest) {
++                        nearest = d;
++                        near = i;
++                    }
++                }
++                if (near >= 0)
++                    return near;
++            }
++        }
++    }
++
++    for (i = 0; i < CONTROL_COUNT; i++) {
++        float capture, distance;
++        if (c[i].r <= 0.0f || c[i].kind == KIND_STICK)
++            continue;
++        capture = c[i].r * 1.25f;
++        distance = sqrtf((px - c[i].x) * (px - c[i].x) + (py - c[i].y) * (py - c[i].y));
++        if (distance <= capture && distance / capture < best_distance) {
++            best_distance = distance / capture;
++            best = i;
++        }
++    }
++    if (best >= 0)
++        return best;
++    return px < w * 0.5f ? 0 : 1;   /* controls 0 and 1 are the sticks */
++}
++
++static int finger_slot(SDL_FingerID id)
++{
++    int i;
++
++    for (i = 0; i < s_nfingers; i++)
++        if (s_fingers[i].id == id)
++            return i;
++    return -1;
++}
++
++static void track_controllers(void)
++{
++    /* A controller plugged or unplugged mid-game: the overlay follows. */
++    int present = pad_present();
++
++    if (present == s_pad_present)
++        return;
++    s_pad_present = present;
++    if (present)
++        release_all();
++    TLOG("controller %s: on-screen pad %s", present ? "connected" : "removed",
++         present ? "hidden" : "shown");
++}
++
++/* ---- public ----------------------------------------------------------- */
++
++void touch_pad_init(void)
++{
++    const char *env = getenv("RECOMP_TOUCH_PAD");
++
++    if (env && (env[0] == '0' || env[0] == 'n' || env[0] == 'N'))
++        return;
++    /* The accelerometer must not count as a controller: on a phone that has one
++     * it would hide the pad forever. */
++    SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
++    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
++        TLOG("SDL joystick init failed: %s", SDL_GetError());
++    s_pad_present = pad_present();
++    s_enabled = 1;
++    xbox_pad_override = touch_report;
++    {
++        int n = SDL_NumJoysticks(), i;
++
++        for (i = 0; i < n; i++) {
++            SDL_Joystick *j = SDL_JoystickOpen(i);
++            int buttons = j ? SDL_JoystickNumButtons(j) : -1;
++
++            TLOG("joystick %d: \"%s\", %d buttons, game controller: %d", i,
++                 SDL_JoystickNameForIndex(i), buttons, SDL_IsGameController(i));
++            if (j)
++                SDL_JoystickClose(j);
++        }
++        TLOG("on-screen controls ready (%d joystick(s), controller %s)", n,
++             s_pad_present ? "connected: pad hidden" : "absent: pad shown");
++    }
++}
++
++int touch_pad_enabled(void)
++{
++    return s_enabled && !s_pad_present;
++}
++
++void touch_pad_event(const SDL_Event *e, SDL_Renderer *ren)
++{
++    control ctrl[CONTROL_COUNT];
++    float px, py;
++    int index;
++
++    if (!s_enabled || !ren)
++        return;
++    if (s_win_w <= 0 || s_win_h <= 0) {
++        SDL_GetRendererOutputSize(ren, &s_win_w, &s_win_h);
++        if (s_win_w <= 0 || s_win_h <= 0)
++            return;
++    }
++
++    if (e->type == SDL_JOYDEVICEADDED || e->type == SDL_JOYDEVICEREMOVED) {
++        track_controllers();
++        return;
++    }
++
++    /* Touches only. SDL also synthesises a mouse event per tap, in a different
++     * coordinate space (2/3 of the surface on this phone), which made a press
++     * on START land in the left half and grab the stick. */
++    if (e->type != SDL_FINGERDOWN && e->type != SDL_FINGERMOTION &&
++        e->type != SDL_FINGERUP)
++        return;
++
++    build_layout(ctrl, (float)s_win_w, (float)s_win_h);
++
++    switch (e->type) {
++        case SDL_FINGERDOWN: {
++            SDL_FingerID id = e->tfinger.fingerId;
++
++            if (s_pad_present || s_nfingers >= MAX_FINGERS || finger_slot(id) >= 0)
++                return;
++            px = e->tfinger.x * (float)s_win_w;
++            py = e->tfinger.y * (float)s_win_h;
++            index = hit_test(ctrl, px, py, (float)s_win_w);
++            if (index < 0 || index >= CONTROL_COUNT)
++                return;
++
++            if (ctrl[index].kind == KIND_ARROW) {
++                if (s_dp_id >= 0)
++                    return;             /* one finger owns the D-pad */
++                s_dp_id = id;
++                dpad_start(ctrl, px, py);
++            } else if (ctrl[index].kind == KIND_STICK) {
++                /* A stick centres under the finger, kept fully on screen; one
++                 * finger per stick. */
++                int stick = ctrl[index].index;
++                if (s_stick_owned[stick])
++                    return;
++                s_stick_owned[stick] = 1;
++                s_stick_ox[stick] = px < ctrl[index].r ? ctrl[index].r
++                                    : (px > (float)s_win_w - ctrl[index].r
++                                           ? (float)s_win_w - ctrl[index].r : px);
++                s_stick_oy[stick] = py < ctrl[index].r ? ctrl[index].r
++                                    : (py > (float)s_win_h - ctrl[index].r
++                                           ? (float)s_win_h - ctrl[index].r : py);
++                s_stick_x[stick] = s_stick_y[stick] = 0.0f;
++            } else {
++                s_held[index] = 1;
++                if (ctrl[index].button != BTN_NONE)
++                    set_button(ctrl[index].button, 1);
++            }
++            if (getenv("RECOMP_TOUCH_TRACE"))
++                TLOG("down id=%lld %.0f,%.0f -> %d %s", (long long)id, (double)px,
++                     (double)py, index, ctrl[index].label);
++            s_fingers[s_nfingers].id = id;
++            s_fingers[s_nfingers].ctrl = index;
++            s_nfingers++;
++            return;
++        }
++        case SDL_FINGERMOTION: {
++            SDL_FingerID id = e->tfinger.fingerId;
++            int slot = finger_slot(id);
++            int stick;
++
++            if (slot < 0)
++                return;
++            px = e->tfinger.x * (float)s_win_w;
++            py = e->tfinger.y * (float)s_win_h;
++            if (id == s_dp_id) {
++                dpad_motion(ctrl, px, py);
++                return;
++            }
++            index = s_fingers[slot].ctrl;
++            if (ctrl[index].kind != KIND_STICK)
++                return;
++            stick = ctrl[index].index;
++            {
++                float x = (px - s_stick_ox[stick]) / (ctrl[index].r * 0.85f);
++                float y = (py - s_stick_oy[stick]) / (ctrl[index].r * 0.85f);
++                float len = sqrtf(x * x + y * y);
++                if (len > 1.0f) {
++                    x /= len;
++                    y /= len;
++                }
++                s_stick_x[stick] = x;
++                s_stick_y[stick] = y;
++            }
++            return;
++        }
++        case SDL_FINGERUP: {
++            SDL_FingerID id = e->tfinger.fingerId;
++            int slot = finger_slot(id);
++
++            if (slot < 0)
++                return;
++            index = s_fingers[slot].ctrl;
++            if (id == s_dp_id)
++                dpad_end(ctrl);
++            s_fingers[slot] = s_fingers[--s_nfingers];
++            if (getenv("RECOMP_TOUCH_TRACE"))
++                TLOG("up id=%lld -> %d %s", (long long)id, index, ctrl[index].label);
++            if (ctrl[index].kind == KIND_STICK) {
++                int stick = ctrl[index].index;
++                s_stick_owned[stick] = 0;
++                s_stick_x[stick] = s_stick_y[stick] = 0.0f;
++            } else {
++                s_held[index] = 0;
++                if (ctrl[index].button != BTN_NONE)
++                    set_button(ctrl[index].button, 0);
++            }
++            return;
++        }
++        default:
++            return;
++    }
++}
++
++void touch_pad_render(SDL_Renderer *ren)
++{
++    control ctrl[CONTROL_COUNT];
++    SDL_Texture *disc;
++    int saved_w = 0, saved_h = 0, i;
++
++    if (!s_enabled || !ren)
++        return;
++
++    track_controllers();
++    if (s_pad_present)
++        return;
++
++    SDL_GetRendererOutputSize(ren, &s_win_w, &s_win_h);
++    if (s_win_w <= 0 || s_win_h <= 0)
++        return;
++    build_layout(ctrl, (float)s_win_w, (float)s_win_h);
++    disc = disc_texture(ren);
++    if (!disc)
++        return;
++
++    /* The frame was just copied through the logical transform; the pad lives in
++     * window pixels, so drop that transform for these draws. */
++    SDL_RenderGetLogicalSize(ren, &saved_w, &saved_h);
++    SDL_RenderSetLogicalSize(ren, 0, 0);
++    for (i = 0; i < CONTROL_COUNT; i++)
++        draw_control(ren, disc, &ctrl[i], s_held[i]);
++    SDL_RenderSetLogicalSize(ren, saved_w, saved_h);
++}
++
++#endif /* __ANDROID__ */
+diff --git a/src/video/touch_pad.h b/src/video/touch_pad.h
+new file mode 100644
+index 0000000..9eae157
+--- /dev/null
++++ b/src/video/touch_pad.h
+@@ -0,0 +1,32 @@
++/* On-screen controls for Android.
++ *
++ * The pad is drawn over the presented frame and reports as pad 0 through the
++ * same XID report the USB gamepad path builds, so the title sees exactly what a
++ * physical controller would send. Layout and look follow the LibertyRecomp
++ * Android port's touch gamepad: translucent rings with coloured face labels, a
++ * left analog stick, the D-pad beside it, and the shoulder/trigger/stick-click
++ * cluster on the right.
++ *
++ * Only built for Android (see src/video/CMakeLists.txt): the drawing needs the
++ * SDL renderer the Android presenter owns.
++ */
++#ifndef XBOX_TOUCH_PAD_H
++#define XBOX_TOUCH_PAD_H
++
++#include <SDL2/SDL.h>
++
++/* Install the pad and hook it into the pad report. RECOMP_TOUCH_PAD=0 turns it
++ * off; on Android it is on by default. Safe to call once, from the thread that
++ * owns the window. */
++void touch_pad_init(void);
++
++/* Feed window input events (call for every event the presenter polls). */
++void touch_pad_event(const SDL_Event *e, SDL_Renderer *ren);
++
++/* Draw the pad over the current frame, before the present. */
++void touch_pad_render(SDL_Renderer *ren);
++
++/* 1 when the pad is showing. */
++int touch_pad_enabled(void);
++
++#endif /* XBOX_TOUCH_PAD_H */
 diff --git a/src/video/video_player.h b/src/video/video_player.h
 index c844aef..cf11ad1 100644
 --- a/src/video/video_player.h
