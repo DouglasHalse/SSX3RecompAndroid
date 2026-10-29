@@ -1,6 +1,9 @@
 # Interactive session: start the game detached with a live pad file, take
 # screenshots of the running window, press buttons, stop it.
-#   powershell -File tools\live.ps1 start [-Env @{...}]   launch; pad file = pad_live.txt
+#   powershell -File tools\live.ps1 start               launch; pad file = pad_live.txt
+#   powershell -Command "& .\tools\live.ps1 start -Env @{RECOMP_WATCH='0x3A4190'}"
+#       -File passes arguments as strings, so a hashtable only binds through
+#       -Command; with -File the -Env switch fails on every launch.
 #   powershell -File tools\live.ps1 snap  [-Out snap.png] screenshot the running window
 #   powershell -File tools\live.ps1 press -Buttons "a"    append "a" (any RECOMP_PAD_SCRIPT button syntax)
 #   powershell -File tools\live.ps1 key -Key 0x0D [-Hold 200]  post a key to the window (RECOMP_KEYBOARD=1 path)
