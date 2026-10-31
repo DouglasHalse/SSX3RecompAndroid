@@ -170,12 +170,14 @@ public class LauncherActivity extends Activity {
         });
         root.addView(sub);
 
-        /* Stamped in by android/build_apk.sh. */
+        /* Stamped in by android/build_apk.sh. A release tag already names one game
+         * commit and one toolkit commit, so the hash would be detail a player cannot
+         * act on; a dev build has no tag to look up. */
         TextView build = new TextView(this);
         String toolkit = BuildInfo.TOOLKIT.isEmpty()
                 ? "" : " + toolkit " + BuildInfo.TOOLKIT;
         build.setText(BuildInfo.RELEASE
-                ? "Version " + BuildInfo.VERSION + toolkit
+                ? "Version " + BuildInfo.VERSION
                 : "Build " + BuildInfo.COMMIT + toolkit + " \u00b7 " + BuildInfo.DATE);
         build.setTextSize(12);
         build.setTextColor(0xFF5E7183);
