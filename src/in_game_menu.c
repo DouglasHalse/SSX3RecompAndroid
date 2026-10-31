@@ -512,6 +512,12 @@ static void poll_pad(void)
 
 void ssx3_InGameMenuInstall(void)
 {
+    /* The port's settings belong in the game's own Options screens; this
+     * overlay is scaffolding, kept behind RECOMP_UI_OVERLAY=1 until those rows
+     * carry every setting. */
+    const char *e = getenv("RECOMP_UI_OVERLAY");
+    if (!e || atoi(e) <= 0)
+        return;
     xbox_ui_draw = draw;
     xbox_ui_key = key;
     xbox_ui_touch = touch;

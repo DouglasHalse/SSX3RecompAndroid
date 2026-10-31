@@ -1541,12 +1541,77 @@ static void row_probe(void)
     }
 }
 
+/* ---- the options list, as the settings rows need it --------------------- */
+
+static uint32_t g_opt_list;
+
+int ssx3_OptionsRowSelected(void)
+{
+    if (!g_opt_list)
+        return -1;
+    return (int)MEM8(g_opt_list + 0x95);
+}
+
+/* Rewrite one of the game's own row labels where it lives in guest memory: the
+ * widget holds a pointer to the wide string and re-reads it every frame, so the
+ * game draws the new text with its own font, bar and navigation. */
+int ssx3_RelabelRow(const char *from, const char *to)
+{
+    size_t n = strlen(from), j;
+    uint32_t va;
+    int hits = 0;
+
+    if (!n)
+        return 0;
+    for (va = 0x81000000u; va + n * 2u < 0x81300000u; va += 2) {
+        char *p = (char *)XBOX_PTR(va);
+        if ((unsigned char)p[0] != (unsigned char)from[0] || p[1] != 0)
+            continue;
+        for (j = 1; j < n; j++)
+            if ((unsigned char)p[j * 2] != (unsigned char)from[j] || p[j * 2 + 1] != 0)
+                break;
+        if (j != n)
+            continue;
+        for (j = 0; j < n; j++) {
+            char c = to[j] ? to[j] : ' ';
+            p[j * 2] = c;
+            p[j * 2 + 1] = 0;
+        }
+        hits++;
+    }
+    return hits;
+}
+
 void sub_00202460(void)
 {
     uint32_t scr = g_ecx;
     if (scr && (int32_t)MEM32(scr + 0xC) == 24) {
+        if (!g_opt_list) {
+            static uint32_t known;
+            if (known && MEM32(known) == 0x002F8958u) {
+                g_opt_list = known;
+            } else {
+                uint32_t va;
+                for (va = 0x81000000u; va + 0xC0u < 0x81300000u; va += 4) {
+                    const unsigned char *p = (const unsigned char *)XBOX_PTR(va);
+                    if (*(const uint32_t *)p != 0x002F8958u)
+                        continue;
+                    if (p[0x96] == 8 && p[0x97] == 8) {
+                        g_opt_list = known = va;
+                        break;
+                    }
+                }
+            }
+            if (g_opt_list) {
+                int hits = ssx3_RelabelRow("Credits", "VIDEO");
+                fprintf(stderr, "[PAGE] options list %08X, entry relabel %d\n", g_opt_list, hits);
+                fflush(stderr);
+            }
+        }
         ram_scan();
         row_probe();
+    } else {
+        g_opt_list = 0;
     }
     {
         /* RECOMP_UI_TRACE=2: every screen state change, with the screen's

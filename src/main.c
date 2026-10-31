@@ -898,7 +898,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* The options screen's file first: everything below reads the variables
      * it sets, and the screen edits them while the game runs. */
     ssx3_SettingsLoad();
-    ssx3_InGameMenuInstall();
+    ssx3_SettingsPageInstall();
 
     /* Runtime options SSX 3 needs; set before anything reads them, and only
      * when not already set, so a run can still override them.

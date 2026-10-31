@@ -27,7 +27,7 @@
 extern int ssx3_main(int argc, char **argv);        /* src/main.c, -Dmain=ssx3_main */
 extern void xbox_FramebufferWindowRunHere(void);    /* toolkit: fb_present_sdl.c */
 extern void ssx3_SettingsLoad(void);                /* src/settings.c */
-extern void ssx3_InGameMenuInstall(void);           /* src/in_game_menu.c */
+extern void ssx3_SettingsPageInstall(void);        /* src/settings_page.c */
 
 static int    s_argc;
 static char **s_argv;
@@ -244,7 +244,7 @@ int main(int argc, char **argv)
 
     /* The options screen draws into the presenter's loop, so it is installed
      * on this thread, before the loop starts. */
-    ssx3_InGameMenuInstall();
+    ssx3_SettingsPageInstall();
 
     /* Blocks for the life of the app: SDL events, frame blit, FPS title. */
     xbox_FramebufferWindowRunHere();
