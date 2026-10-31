@@ -127,7 +127,7 @@ public class LauncherActivity extends Activity {
         startExtract(fd);
     }
 
-    private LinearLayout buildUi() {
+    private android.view.View buildUi() {
         int pad = (int) (24 * getResources().getDisplayMetrics().density);
 
         LinearLayout root = new LinearLayout(this);
@@ -235,7 +235,15 @@ public class LauncherActivity extends Activity {
         flp.topMargin = pad;
         root.addView(foot, flp);
 
-        return root;
+        /* A phone in landscape has less height than this column needs, and the
+         * buttons at the bottom are the ones that matter. */
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(0xFF101418);
+        scroll.addView(root, new android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
+        return scroll;
     }
 
     /** <root>/recomp.cfg, so the game starts with what the settings screen says. */
