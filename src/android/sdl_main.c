@@ -150,8 +150,7 @@ static void *game_thread(void *arg)
     (void)arg;
     int rc = ssx3_main(s_argc, s_argv);
     fprintf(stderr, "[ANDROID] game returned %d\n", rc);
-    fflush(NULL);
-    usleep(200 * 1000);
+    log_drain();
     /* The presenter loop owns the SDL thread; stop it once the guest is done. */
     _exit(rc);
     return NULL;
@@ -229,11 +228,13 @@ int main(int argc, char **argv)
 
     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "[ANDROID] SDL video init failed: %s\n", SDL_GetError());
+        log_drain();
         return 1;
     }
 
     if (pthread_create(&th, NULL, game_thread, NULL) != 0) {
         fprintf(stderr, "[ANDROID] cannot start the game thread\n");
+        log_drain();
         return 1;
     }
     pthread_detach(th);
