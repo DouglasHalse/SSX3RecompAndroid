@@ -196,6 +196,10 @@ connected, and press Play. The choices are kept in `launcher.ini`.
 `ssx3_recomp.exe`, a player README; no game files) for running it without
 a build environment: unzip, run `launcher.exe`, play.
 
+The launcher still works and still keeps `launcher.ini`, but the game's own
+screen is the settings home: `ssx3.cfg` overrides whatever the launcher passes
+for the rows it has been used to change.
+
 On Android the launcher is now **Select game image** and **Play** only; the
 options live in the game itself, behind the **OPTIONS** button at the top of the
 screen, and are kept in `ssx3.cfg` next to `game/`. See
