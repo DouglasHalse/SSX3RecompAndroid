@@ -77,6 +77,8 @@ set(GAME_SOURCES
     src/web_platform.c
     src/settings.c
     src/in_game_menu.c
+    src/ui_font.c
+    src/probe.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
     # src/custom_renderer.c

@@ -1054,9 +1054,70 @@ extern void sub_0008C540_gen(void);
 static int ui_trace_on(void)
 {
     static int on = -1;
-    if (on < 0)
-        on = getenv("RECOMP_UI_TRACE") != NULL;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_UI_TRACE");
+        on = e ? (int)strtol(e, NULL, 0) : 0;
+        if (e && on <= 0)
+            on = 1;                     /* RECOMP_UI_TRACE= counts as 1 */
+    }
     return on;
+}
+
+/* RECOMP_UI_TRACE=2 also dumps the list widget; =3 follows its rows. */
+static void ui_list_dump(uint32_t self)
+{
+    int k;
+    fprintf(stderr, "[UI] dump %08X:", self);
+    for (k = 0; k < 0xC0; k += 4)
+        fprintf(stderr, " %08X", MEM32(self + (uint32_t)k));
+    fprintf(stderr, "\n");
+    fflush(stderr);
+}
+
+/* RECOMP_UI_TRACE=3 follows the rows: the list holds a pointer to an array of
+ * item records, and each record is expected to name the row's text. Printing
+ * the records and resolving the pointers in them that land on a string is
+ * what turns "8 items" into an item format. */
+static int guest_ptr(uint32_t va)
+{
+    return (va >= 0x00010000u && va < 0x00400000u)      /* the XBE image */
+        || (va >= 0x80000000u && va < 0x84000000u);     /* the guest heap */
+}
+
+static void ui_str(uint32_t va)
+{
+    const char *p;
+    int i;
+    if (!guest_ptr(va))
+        return;
+    p = (const char *)XBOX_PTR(va);
+    for (i = 0; i < 40 && p[i]; i++)
+        if ((unsigned char)p[i] < 0x20 || (unsigned char)p[i] > 0x7E)
+            return;
+    if (i >= 2)
+        fprintf(stderr, "      str %08X \"%.*s\"\n", va, i, p);
+}
+
+static void ui_rows_dump(uint32_t self)
+{
+    static const int off[3] = {0x7C, 0x80, 0x88};
+    int a, k, j;
+    for (a = 0; a < 3; a++) {
+        uint32_t p = MEM32(self + (uint32_t)off[a]);
+        if (!guest_ptr(p))
+            continue;
+        fprintf(stderr, "[UI] rows +%02X -> %08X\n", off[a], p);
+        for (k = 0; k < 8; k++) {
+            uint32_t rec = p + (uint32_t)(k * 0x20);
+            fprintf(stderr, "  [%d] %08X:", k, rec);
+            for (j = 0; j < 8; j++)
+                fprintf(stderr, " %08X", MEM32(rec + (uint32_t)j * 4));
+            fprintf(stderr, "\n");
+            for (j = 0; j < 8; j++)
+                ui_str(MEM32(rec + (uint32_t)j * 4));
+        }
+    }
+    fflush(stderr);
 }
 
 /* Lists seen being set up (sub_00205D40, this = the list): the main menu's
@@ -1083,6 +1144,10 @@ void sub_00205D40(void)
                 MEM8(self + 0xA4), MEM32(self + 0x5C), MEM32(g_esp));
         fflush(stderr);
     }
+    if (ui_trace_on() >= 2)
+        ui_list_dump(g_ecx);
+    if (ui_trace_on() >= 3)
+        ui_rows_dump(g_ecx);
     sub_00205D40_gen();
 }
 
@@ -1348,9 +1413,141 @@ static void screen_note(uint32_t scr)
     }
 }
 
+/* RECOMP_RAMSCAN="a;b" finds those strings in guest memory once, when the
+ * Options screen comes up, with the address of each -- a row's text either
+ * lives somewhere a widget can point at, or is pre-rendered and cannot be
+ * replaced by pointing. */
+static void ram_scan(void)
+{
+    static int done;
+    const char *list = getenv("RECOMP_RAMSCAN");
+    char buf[160];
+    size_t i;
+    char *tok;
+
+    if (done || !list || !*list)
+        return;
+    done = 1;
+    for (i = 0; list[i] && i < sizeof buf - 1; i++)
+        buf[i] = list[i];
+    buf[i] = 0;
+    for (tok = strtok(buf, ";"); tok; tok = strtok(NULL, ";")) {
+        size_t n = strlen(tok);
+        const uint32_t win[2][2] = { {0x00010000u, 0x00400000u}, {0x80000000u, 0x84000000u} };
+        int w;
+        for (w = 0; w < 2; w++) {
+            uint32_t va;
+            for (va = win[w][0]; va + n < win[w][1]; va++) {
+                const char *p = (const char *)XBOX_PTR(va);
+                if (p[0] == tok[0] && memcmp(p, tok, n) == 0) {
+                    fprintf(stderr, "[SCAN] %08X \"%.48s\"\n", va, p);
+                    fflush(stderr);
+                }
+            }
+        }
+        /* The front end's text is UTF-16: the same token with a zero between
+         * every character. */
+        {
+            uint32_t hits[16];
+            unsigned nh = 0;
+            for (w = 0; w < 2 && nh < 16; w++) {
+                uint32_t va;
+                for (va = win[w][0]; va + n * 2 < win[w][1] && nh < 16; va++) {
+                    const char *p = (const char *)XBOX_PTR(va);
+                    size_t k;
+                    if ((unsigned char)p[0] != (unsigned char)tok[0] || p[1] != 0)
+                        continue;
+                    for (k = 1; k < n; k++)
+                        if ((unsigned char)p[k * 2] != (unsigned char)tok[k] || p[k * 2 + 1] != 0)
+                            break;
+                    if (k == n) {
+                        hits[nh++] = va;
+                        fprintf(stderr, "[SCAN] wide %08X \"%s\"\n", va, tok);
+                        fflush(stderr);
+                    }
+                }
+            }
+            /* Who points at that text: a widget holding the address can be
+             * repointed, one that copied the characters has to be rewritten
+             * after it is built. */
+            if (nh) {
+                for (w = 0; w < 2; w++) {
+                    uint32_t va;
+                    for (va = win[w][0]; va + 4 < win[w][1]; va += 4) {
+                        uint32_t v = MEM32(va);
+                        unsigned j;
+                        for (j = 0; j < nh; j++)
+                            if (v == hits[j]) {
+                                fprintf(stderr, "[SCAN] ref %08X -> %08X\n", va, v);
+                                fflush(stderr);
+                            }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* RECOMP_ROWPROBE="Game Options=TEST ROW": rewrite that row's label text in
+ * place (UTF-16, the original length, space-padded) once the Options screen
+ * is up. If the row shows the new text, the widget reads the string every
+ * frame and a row can simply be relabelled. */
+static void row_probe(void)
+{
+    static int done;
+    const char *spec = getenv("RECOMP_ROWPROBE");
+    char buf[160], *eq;
+    size_t n, k;
+
+    if (done || !spec || !*spec)
+        return;
+    done = 1;
+    strncpy(buf, spec, sizeof buf - 1);
+    buf[sizeof buf - 1] = 0;
+    eq = strchr(buf, '=');
+    if (!eq)
+        return;
+    *eq++ = 0;
+    n = strlen(buf);
+    for (k = 0; k < n; k++)
+        if (buf[k] == '_')
+            buf[k] = ' ';
+    {
+        const uint32_t win[2][2] = { {0x00010000u, 0x00400000u}, {0x80000000u, 0x84000000u} };
+        int w;
+        for (w = 0; w < 2; w++) {
+            uint32_t va;
+            for (va = win[w][0]; va + n * 2 < win[w][1]; va++) {
+                char *p = (char *)XBOX_PTR(va);
+                size_t j;
+                if ((unsigned char)p[0] != (unsigned char)buf[0] || p[1] != 0)
+                    continue;
+                for (j = 1; j < n; j++)
+                    if ((unsigned char)p[j * 2] != (unsigned char)buf[j] || p[j * 2 + 1] != 0)
+                        break;
+                if (j != n)
+                    continue;
+                for (j = 0; j < n; j++) {
+                    char c = eq[j] ? eq[j] : ' ';
+                    if (c == '_')
+                        c = ' ';
+                    p[j * 2] = c;
+                    p[j * 2 + 1] = 0;
+                }
+                fprintf(stderr, "[ROW] %08X \"%s\" <- \"%s\"\n", va, buf, eq);
+                fflush(stderr);
+            }
+        }
+    }
+}
+
 void sub_00202460(void)
 {
     uint32_t scr = g_ecx;
+    if (scr && (int32_t)MEM32(scr + 0xC) == 24) {
+        ram_scan();
+        row_probe();
+    }
     {
         /* RECOMP_UI_TRACE=2: every screen state change, with the screen's
          * first children (the widget list at +0x24: head [+0x24+0xC]). */

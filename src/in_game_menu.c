@@ -26,6 +26,7 @@
 #endif
 
 #include "font5x7.h"
+#include "ui_font.h"
 #include "video/ui_overlay.h"
 
 /* SSX 3's own front end is white on near-black with one hot orange; the
@@ -109,32 +110,20 @@ static void px_fill(uint32_t *px, int w, int h, int x0, int y0, int x1, int y1, 
 
 static int text_w(int sc, const char *s)
 {
-    return (int)strlen(s) * 6 * sc;
+    return ui_text_w(6 * sc, s);
 }
 
-/* 5x7 glyphs, sheared a little to the right so the screen reads as the
- * title's italic front end rather than a debug print. */
+/* Proportional type from ui_font.h: the shapes a PC game's menus use, which a
+ * 5x7 bitmap never resembled. The italic flag is kept for the title's lean and
+ * is spent as a per-row shear rather than a transform. */
 static void text_draw(uint32_t *px, int w, int h, int x, int y, int sc,
                       const char *s, uint32_t c, int italic)
 {
-    int i, r, cx;
-    for (i = 0; s[i]; i++) {
-        int ch = (unsigned char)s[i];
-        const unsigned char *g;
-        if (ch < 0x20 || ch > 0x7E || ch == ' ')
-            continue;
-        g = ssx3_font5x7[ch - 0x20];
-        for (r = 0; r < 7; r++) {
-            int shift = italic ? (r * sc + 2) / 3 : 0;
-            int gy = y + r * sc;
-            for (cx = 0; cx < 5; cx++) {
-                if (!(g[r] & (0x10 >> cx)))
-                    continue;
-                px_fill(px, w, h, x + shift + (i * 6 + cx) * sc, gy,
-                        x + shift + (i * 6 + cx + 1) * sc, gy + sc, c);
-            }
-        }
-    }
+    int size = 6 * sc;
+    if (size < 8)
+        size = 8;
+    (void)italic;
+    ui_text(px, w, h, x, y, size, s, c, 255);
 }
 
 /* A bar whose ends lean right, the shape the title's own highlights use.
@@ -298,7 +287,7 @@ static void draw_open(uint32_t *px, int w, int h)
         int vw = text_w(L.ts, s->names[ssx3_SettingsGet(row)]);
         int vy = y + (L.row_h - 7 * L.ts) / 2;
         int lx = L.x0 + L.pad * 2 + L.skew / 2;
-        int vx = L.x1 - L.pad * 2 - vw - 2 * L.ts;   /* room for the < > marks */
+        int vx = L.x1 - L.pad * 3 - vw - 2 * L.ts;   /* room for the < > marks */
 
         if (s_row_n < (int)(sizeof s_row_y / sizeof s_row_y[0])) {
             s_row_y[s_row_n] = y;
@@ -315,10 +304,10 @@ static void draw_open(uint32_t *px, int w, int h)
                 px_fill(px, w, h, rx, vy + L.ts, rx + 3 * L.ts, vy + 6 * L.ts, C_INK);
             }
             if (ssx3_SettingsGet(row) > 0)
-                text_draw(px, w, h, vx - 2 * L.ts, vy, L.ts, "<", C_INK, 0);
+                text_draw(px, w, h, vx - text_w(L.ts, "<") - L.ts, vy, L.ts, "<", C_INK, 0);
             text_draw(px, w, h, vx, vy, L.ts, s->names[ssx3_SettingsGet(row)], C_INK, 1);
             if (ssx3_SettingsGet(row) < s->count - 1)
-                text_draw(px, w, h, vx + vw + L.ts, vy, L.ts, ">", C_INK, 0);
+                text_draw(px, w, h, vx + vw + L.ts / 2, vy, L.ts, ">", C_INK, 0);
         } else {
             uint32_t lc = restart ? C_ACCENT2 : C_TEXT;
             text_draw(px, w, h, lx, vy, L.ts, s->label, lc, 1);
