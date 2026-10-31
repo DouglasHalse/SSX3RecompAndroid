@@ -1,15 +1,19 @@
-# SSX3RecompAndroid
+# SSX3RecompNative
 
 [![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/434-ssx-3/)
 
-An **Android port** of [ssx3-recomp](https://github.com/koenhendriks/SSX3-recomp), the static
-recompilation of **SSX 3** (original Xbox, PAL): the game's PowerPC code is recompiled to
-native ARM64 and the Xbox GPU is emulated on Vulkan. **There is no emulator in between**: it
-runs on the phone itself, with on-screen controls and saves written to the device.
+A fork of [ssx3-recomp](https://github.com/koenhendriks/SSX3-recomp) — the static recompilation
+of **SSX 3** (original Xbox, PAL) — where the game's settings live **in the game**. There is no
+settings screen before play: the OPTIONS screen is drawn by the port itself, over the running
+frame, on the phone and on the desktop ([what it looks like](#what-this-fork-adds)).
+
+The game's PowerPC code is recompiled to native ARM64 (or x64) and the Xbox GPU is emulated on
+Vulkan. **There is no emulator in between**: it runs on the device itself, with on-screen
+controls and saves written to it.
 
 Upstream targets Windows and Linux and supplies almost everything here: the recompiled code,
 the Vulkan renderer, the launcher, HD textures, widescreen. This fork adds the Android platform
-layer and what a phone needs. The toolkit side of it lives in
+layer, what a phone needs, and the in-game options screen. The toolkit side of it lives in
 [DouglasHalse/xboxrecomp](https://github.com/DouglasHalse/xboxrecomp) (branch `android-port`).
 
 ## Made with AI

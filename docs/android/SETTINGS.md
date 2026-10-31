@@ -5,6 +5,9 @@ at the top of the screen opens it (F10, or a pad's Back, on a desktop). The list
 is the one the launcher used to hold — the launcher is now only *Select game
 image* and *Play*.
 
+![The OPTIONS button while playing](menu-android-closed.png)
+![The options screen on a phone](menu-android.png)
+
 The screen writes `ssx3.cfg` next to `game/`, and the game reads it before it
 reads anything else:
 
