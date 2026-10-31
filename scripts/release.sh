@@ -59,7 +59,10 @@ COMMIT=$(git rev-parse --short HEAD)
 TOOLKIT_DIR=${TOOLKIT_DIR:-$(sed -n 's/^XBOXRECOMP_DIR:[A-Z]*=//p' build-android/CMakeCache.txt 2>/dev/null | head -1)}
 TOOLKIT_DIR=${TOOLKIT_DIR:-$ROOT/../xboxrecomp}
 TOOLKIT_COMMIT=$( (cd "$TOOLKIT_DIR" && git rev-parse --short HEAD) 2>/dev/null || echo unknown )
-VERSION_CODE=$(git rev-list --count HEAD)
+# A commit count dips whenever history is squashed or a build is tried on a
+# branch ahead of main, and Android refuses an update whose code is lower than
+# what the device runs. The date only moves forward.
+VERSION_CODE=${VERSION_CODE:-$(date +%y%m%d)}
 
 # The changelog reads from the previous release: this repo since its tag, the
 # toolkit since the commit that release was built with. The tag annotation
