@@ -191,6 +191,14 @@ connected, and press Play. The choices are kept in `launcher.ini`.
 `ssx3_recomp.exe`, a player README; no game files) for running it without
 a build environment: unzip, run `launcher.exe`, play.
 
+On Android the launcher's **Settings** screen carries the options a phone
+needs: aspect (fill or 4:3), modern camera, FPS counter, anti-aliasing,
+anisotropic filtering, draw distance, shadows, HD textures, HUD edges, CRT
+filter, motion blur, intro and fast boot, debug menu, money cheat, and log
+level. There is no resolution row: the game renders at the display's short
+side. The choices live in `recomp.cfg` next to `game/`; see
+[`docs/android/SETTINGS.md`](docs/android/SETTINGS.md).
+
 From a console, `tools\play.bat` does the same with the defaults, which
 follow your monitor.
 

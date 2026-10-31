@@ -207,10 +207,22 @@ public class LauncherActivity extends Activity {
         play = new Button(this);
         play.setText("Play");
         play.setEnabled(false);
-        play.setOnClickListener(v -> startActivity(
-                new Intent(this, org.libsdl.app.SDLActivity.class)));
-        root.addView(play, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        play.setOnClickListener(v -> {
+            writeSettings();
+            startActivity(new Intent(this, org.libsdl.app.SDLActivity.class));
+        });
+        LinearLayout.LayoutParams plpl = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        plpl.topMargin = pad / 3;
+        root.addView(play, plpl);
+
+        Button settings = new Button(this);
+        settings.setText("Settings");
+        settings.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = pad / 4;
+        root.addView(settings, slp);
 
         TextView foot = new TextView(this);
         foot.setText("SSX 3 is a trademark of its owners. No game data ships with this app: "
@@ -224,6 +236,15 @@ public class LauncherActivity extends Activity {
         root.addView(foot, flp);
 
         return root;
+    }
+
+    /** <root>/recomp.cfg, so the game starts with what the settings screen says. */
+    private void writeSettings() {
+        try {
+            Settings.write(this, new File(getExternalFilesDir(null), "ssx3"));
+        } catch (Exception e) {
+            status.setText("Cannot write settings: " + e.getMessage());
+        }
     }
 
     /** What state the game data is in. */

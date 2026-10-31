@@ -324,6 +324,11 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         Log.v(TAG, "onCreate()");
         super.onCreate(savedInstanceState);
 
+        /* The screen stays on for as long as the game is in front: a phone in
+         * someone's hands has no keyboard to wake it, and SDL's own hint only
+         * sets this when the guest asks for it. */
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
         try {
             Thread.currentThread().setName("SDLActivity");
         } catch (Exception e) {
