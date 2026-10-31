@@ -172,7 +172,7 @@ static Layout layout_of(int w, int h)
     L.x1 = w - L.x0;
     L.y0 = (int)(h * 0.075f);
     L.y1 = h - L.y0;
-    L.list_top = L.y0 + (7 * ts) * 2 + L.pad;
+    L.list_top = L.y0 + (7 * ts) * 2 + L.pad * 2;
     L.hint_y = L.y1 - L.pad - 7 * L.hs;
     L.help_y = L.hint_y - L.pad - 7 * L.hs;
     L.list_bot = L.help_y - L.pad;
@@ -206,12 +206,25 @@ static void scroll_to_show(int slot, int vis)
         s_scroll = 0;
 }
 
-/* "OPTIONS" pill, shown while the screen is closed on a touch device. */
+/* "OPTIONS" pill, shown while the screen is closed on a touch device. Sized to
+ * a finger rather than to the text: it is the only way in on a phone. */
+static int pill_scale(int w, int h)
+{
+    int ts = h / 180;
+    if (ts < 2) ts = 2;
+    return ts + ts / 2;
+}
+
 static void pill_rect(int w, int h, int *x0, int *y0, int *x1, int *y1)
 {
-    int pw = w / 7, ph = h / 15;
+    int ts = h / 180;
+    int pts = pill_scale(w, h);
+    int pw, ph;
+    if (ts < 2) ts = 2;
+    pw = text_w(pts, "OPTIONS") + ts * 6;
+    ph = 7 * pts + ts * 6;
     *x0 = w / 2 - pw / 2;
-    *y0 = h / 40;
+    *y0 = h / 32;
     *x1 = *x0 + pw;
     *y1 = *y0 + ph;
 }
@@ -219,14 +232,13 @@ static void pill_rect(int w, int h, int *x0, int *y0, int *x1, int *y1)
 static void draw_closed(uint32_t *px, int w, int h)
 {
 #if defined(__ANDROID__)
-    Layout L = layout_of(w, h);
-    int x0, y0, x1, y1, tw;
+    int x0, y0, x1, y1, tw, pts = pill_scale(w, h);
     pill_rect(w, h, &x0, &y0, &x1, &y1);
-    px_blend(px, w, h, x0, y0, x1, y1, C_PANEL, 150);
-    px_fill(px, w, h, x0, y1 - 2, x1, y1, C_ACCENT);
-    tw = text_w(L.ts, "OPTIONS");
-    text_draw(px, w, h, (x0 + x1 - tw) / 2, y0 + (y1 - y0 - 7 * L.ts) / 2,
-              L.ts, "OPTIONS", C_TEXT, 1);
+    px_blend(px, w, h, x0, y0, x1, y1, C_PANEL, 170);
+    px_fill(px, w, h, x0, y1 - 3, x1, y1, C_ACCENT);
+    tw = text_w(pts, "OPTIONS");
+    text_draw(px, w, h, (x0 + x1 - tw) / 2, y0 + (y1 - y0 - 7 * pts) / 2,
+              pts, "OPTIONS", C_TEXT, 1);
 #else
     (void)px; (void)w; (void)h;
 #endif
@@ -253,9 +265,23 @@ static void draw_open(uint32_t *px, int w, int h)
         text_draw(px, w, h, tx, by0 + L.pad / 2, big, "OPTIONS", C_INK, 1);
     }
     {
-        int tw = text_w(L.ts, "SSX 3");
-        text_draw(px, w, h, L.x1 - L.pad - tw, L.y0 + L.pad + (7 * big - 7 * L.ts) / 2,
-                  L.ts, "SSX 3", C_DIM, 1);
+#if defined(__ANDROID__)
+        /* The way out, where a phone puts one: top right, a finger wide. */
+        int cw = text_w(L.ts, "CLOSE") + L.pad * 2;
+        int cx = L.x1 - L.pad - cw;
+        int cy = L.y0 + L.pad / 2;
+        px_fill(px, w, h, cx, cy, cx + cw, cy + 7 * L.ts + L.pad, C_PANEL2);
+        px_fill(px, w, h, cx, cy + 7 * L.ts + L.pad - 3, cx + cw, cy + 7 * L.ts + L.pad, C_ACCENT);
+        text_draw(px, w, h, cx + L.pad, cy + L.pad / 2, L.ts, "CLOSE", C_TEXT, 1);
+        s_close_tap[0] = cx; s_close_tap[1] = cy;
+        s_close_tap[2] = cx + cw; s_close_tap[3] = cy + 7 * L.ts + L.pad;
+#else
+        {
+            int tw = text_w(L.ts, "SSX 3");
+            text_draw(px, w, h, L.x1 - L.pad - tw, L.y0 + L.pad + (7 * big - 7 * L.ts) / 2,
+                      L.ts, "SSX 3", C_DIM, 1);
+        }
+#endif
     }
 
     s_panel[0] = L.x0; s_panel[1] = L.y0; s_panel[2] = L.x1; s_panel[3] = L.y1;
@@ -311,9 +337,9 @@ static void draw_open(uint32_t *px, int w, int h)
         int row = row_of_slot(s_sel);
         text_draw(px, w, h, L.x0 + L.pad * 2, L.help_y, L.hs, ssx3_settings[row].help, C_DIM, 0);
         if (changed_restart) {
-            int tw = text_w(L.hs, "SOME SETTINGS APPLY AFTER A RESTART");
-            text_draw(px, w, h, L.x1 - L.pad * 2 - tw, L.help_y, L.hs,
-                      "SOME SETTINGS APPLY AFTER A RESTART", C_ACCENT2, 0);
+            const char *note = "RESTART NEEDED";
+            int tw = text_w(L.hs, note);
+            text_draw(px, w, h, L.x1 - L.pad * 2 - tw, L.help_y, L.hs, note, C_ACCENT2, 0);
         }
     }
     {
@@ -325,16 +351,6 @@ static void draw_open(uint32_t *px, int w, int h)
 #endif
         int hy = L.hint_y;
         text_draw(px, w, h, L.x0 + L.pad * 2, hy, L.hs, hint, C_DIM, 0);
-#if defined(__ANDROID__)
-        {
-            int cw = text_w(L.hs, "CLOSE") + L.pad * 2;
-            int cx = L.x1 - L.pad * 2 - cw;
-            px_fill(px, w, h, cx, hy - L.pad / 2, cx + cw, hy + 7 * L.hs + L.pad / 2, C_PANEL2);
-            text_draw(px, w, h, cx + L.pad, hy, L.hs, "CLOSE", C_TEXT, 1);
-            s_close_tap[0] = cx; s_close_tap[1] = hy - L.pad / 2;
-            s_close_tap[2] = cx + cw; s_close_tap[3] = hy + 7 * L.hs + L.pad / 2;
-        }
-#endif
     }
 }
 

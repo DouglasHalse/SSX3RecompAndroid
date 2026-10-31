@@ -56,6 +56,7 @@ In this repo:
 | `src/ssx3_overrides.c` | Hand-written replacements for generated functions (`--exclude-manual` skips their bodies) + bring-up tracing wrappers. |
 | `src/recomp_manual.c` | Template file; `recomp_lookup_manual` routes indirect calls to `ssx3_lookup_trace`. Do not use its `extern uint32_t g_eax` — see gotchas. |
 | `src/thread_dump.c` | `RECOMP_THREAD_DUMP_SECS=N`: native stack + guest registers of every thread. |
+| `src/settings.c`, `src/in_game_menu.c` | The in-game options screen: the row table, `ssx3.cfg`, and the drawing/input for the screen itself. The presenter draws it through the hooks in the toolkit's `src/video/ui_overlay.h`; `tools/menu_shot.ps1` drives it on Windows, `tools/menu_render.bat` renders it on the host (Android branch included). |
 | `tools/build.bat` | MSVC + Ninja release build (Windows), `[jobs]` arg, default 16. |
 | `tools/run.ps1` | Run with stdout/stderr capture, timeout kill, `-Watchdog N`, `-ThreadDump N`, `-Env @{...}`. |
 | `tools/shot.ps1` | Run, screenshot the game window after `-After N` s, kill. |

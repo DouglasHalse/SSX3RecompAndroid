@@ -51,8 +51,8 @@ Draw distance, HUD placement and the frame counter take effect as the value
 changes: their readers look at the variable again on the next frame.
 
 The rest are read while the renderer or the title starts, so changing one marks
-the row with a small square and puts *some settings apply after a restart* under
-the list. They take effect the next time the game starts.
+the row with a small square and shows *restart needed* under the list. They take
+effect the next time the game starts.
 
 ## Render height
 

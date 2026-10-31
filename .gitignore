@@ -106,3 +106,6 @@ pad.txt
 
 # ride captures (tools/capture writes here)
 /capture/
+
+# host-side menu render output (tools/menu_render.bat)
+tests/out/
