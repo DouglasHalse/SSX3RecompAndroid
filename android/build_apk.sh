@@ -27,7 +27,7 @@ PKG=com.douglashalse.ssx3
 COMMIT=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}
 # This APK is built from two repositories -- this one and the toolkit branch
 # that supplies the runtime, the renderer and the touch pad -- so it names both.
-TOOLKIT_DIR=${TOOLKIT_DIR:-$(cd "$ROOT/.." && pwd)/xboxrecomp}
+TOOLKIT_DIR=${TOOLKIT_DIR:-${XBOXRECOMP_DIR:-$(cd "$ROOT/.." && pwd)/xboxrecomp}}
 TOOLKIT_COMMIT=${TOOLKIT_COMMIT:-$( (cd "$TOOLKIT_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null) || true )}
 BUILD_DATE=${BUILD_DATE:-$(date +%Y-%m-%d)}
 VERSION_CODE=${VERSION_CODE:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}

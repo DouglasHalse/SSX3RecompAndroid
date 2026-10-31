@@ -73,8 +73,11 @@ fi
 
 say "building the APK for $TAG (commit $COMMIT, version code $VERSION_CODE)"
 cmake --build build-android --target ssx3_recomp ssx3import --parallel 16 >/dev/null
+# The toolkit stamp has to name the tree this build compiled: the build cache
+# knows it, and build_apk.sh's default (../xboxrecomp) can be another checkout.
+TOOLKIT_DIR=${TOOLKIT_DIR:-$(sed -n 's/^XBOXRECOMP_DIR:[A-Z]*=//p' build-android/CMakeCache.txt 2>/dev/null | head -1)}
 RELEASE=1 VERSION_NAME="$VERSION" VERSION_CODE="$VERSION_CODE" COMMIT="$COMMIT" \
-    OUT=build/release APK_NAME="ssx3-android-$VERSION.apk" \
+    OUT=build/release APK_NAME="ssx3-android-$VERSION.apk" TOOLKIT_DIR="$TOOLKIT_DIR" \
     bash android/build_apk.sh | tail -4
 
 APK="build/release/ssx3-android-$VERSION.apk"
