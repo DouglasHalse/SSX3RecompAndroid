@@ -216,17 +216,10 @@ public class LauncherActivity extends Activity {
         plpl.topMargin = pad / 3;
         root.addView(play, plpl);
 
-        Button settings = new Button(this);
-        settings.setText("Settings");
-        settings.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        slp.topMargin = pad / 4;
-        root.addView(settings, slp);
-
         TextView foot = new TextView(this);
         foot.setText("SSX 3 is a trademark of its owners. No game data ships with this app: "
-                + "you need your own PAL disc image.");
+                + "you need your own PAL disc image. Options are in the game: F10, or the "
+                + "OPTIONS button while playing.");
         foot.setTextSize(11);
         foot.setTextColor(0xFF5E7183);
         foot.setGravity(Gravity.START);

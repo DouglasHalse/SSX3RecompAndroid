@@ -4,6 +4,7 @@
  * 32-bit surface drawn to). Draws and clears on any other target are declined
  * so the software rasteriser still handles them in guest memory. */
 #include "vkr_thread.h"
+#include "settings.h"
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1001,9 +1002,11 @@ static double   s_hud_trace_t;
 static int hud_edges_on(void)
 {
     static int on = -1;
-    if (on < 0) {
+    static unsigned gen;
+    if (on < 0 || gen != ssx3_SettingsGeneration()) {
         const char *e = getenv("RECOMP_HUD_EDGES");
         on = !(e && *e == '0');
+        gen = ssx3_SettingsGeneration();
     }
     return on && ssx3_WidescreenNow();
 }

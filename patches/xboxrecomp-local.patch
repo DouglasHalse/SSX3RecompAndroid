@@ -1768,10 +1768,18 @@ index a91edbe..ae120d6 100644
  }
  
 diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
-index a045752..84373a5 100644
+index a045752..ac12872 100644
 --- a/src/kernel/CMakeLists.txt
 +++ b/src/kernel/CMakeLists.txt
-@@ -21,6 +21,7 @@ set(KERNEL_SOURCES
+@@ -10,6 +10,7 @@ set(KERNEL_SOURCES
+     kernel_rtl.c
+     kernel_memory.c
+     kernel_file.c
++    kernel_iso.c
+     kernel_thread.c
+     kernel_sync.c
+     kernel_hal.c
+@@ -21,6 +22,7 @@ set(KERNEL_SOURCES
      kernel_bridge.c
      xbox_memory_layout.c
      guest_vmem.c
@@ -1779,7 +1787,7 @@ index a045752..84373a5 100644
      icall_feedback.c
      recomp_trace.c
      nv2a_pb_scan.c
-@@ -44,6 +45,9 @@ if(WIN32)
+@@ -44,6 +46,9 @@ if(WIN32)
      # platform is an INTERFACE target on Windows: it contributes the src/
      # include path that "platform/xbox_winnt.h" resolves against.
      target_link_libraries(xbox_kernel PUBLIC platform kernel32 bcrypt)
@@ -1941,6 +1949,28 @@ index 0000000..45b6a74
 +    return (void *)(uintptr_t)(guest_base + g_xbox_pagemap[guest_base >> 20]);
 +}
 +#endif
+diff --git a/src/kernel/kernel.h b/src/kernel/kernel.h
+index b9a02bc..73eab0c 100644
+--- a/src/kernel/kernel.h
++++ b/src/kernel/kernel.h
+@@ -559,6 +559,17 @@ const wchar_t *xbox_LastHostPath(void);
+ 
+ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size);
+ 
++/* The host directory game paths resolve under (kernel_path.c). NULL on a build
++ * that has no such notion. */
++const char *xbox_game_dir(void);
++
++/* Read a game file into memory, host copy first and the mounted image second
++ * (kernel_iso.c). 1 on success with a malloc'd buffer, 0 when neither has it. */
++int xbox_read_game_file(const char *host_path, void **data, size_t *size);
++
++/* 1 when the file is on the host or in the mounted image (kernel_iso.c). */
++int xbox_game_file_exists(const char *host_path);
++
+ /* Optional: a project sets this to see the guest paths the kernel translates
+  * (for example to print who opened a file). NULL by default; called before the
+  * path is translated, on the calling guest thread. Only paths a drive or
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
 index c65ba43..79cb9fb 100644
 --- a/src/kernel/kernel_bridge.c
@@ -3236,11 +3266,15 @@ index c65ba43..79cb9fb 100644
          old_protect,
          &old_protect
 diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
-index 42135e0..f63e442 100644
+index 42135e0..64485bc 100644
 --- a/src/kernel/kernel_file.c
 +++ b/src/kernel/kernel_file.c
-@@ -18,6 +18,8 @@
+@@ -16,13 +16,18 @@
+ 
+ #define _GNU_SOURCE   /* FNM_CASEFOLD */
  #include "kernel.h"
++#include "kernel_iso.h"
++#include "platform/win32_compat.h"
  #include <string.h>
  #include <stdio.h>
 +#include <stdlib.h>
@@ -3248,7 +3282,13 @@ index 42135e0..f63e442 100644
  
  #if !defined(_WIN32)
  #include <fcntl.h>
-@@ -67,6 +69,22 @@ uint32_t xbox_LastFileError(void)
+ #include <unistd.h>
+ #include <errno.h>
++#include <strings.h>
+ #include <sys/stat.h>
+ #include <sys/statvfs.h>
+ #include <dirent.h>
+@@ -67,6 +72,22 @@ uint32_t xbox_LastFileError(void)
      return g_xbox_last_file_error;
  }
  
@@ -3271,7 +3311,41 @@ index 42135e0..f63e442 100644
  #if defined(_WIN32)
  /* ====================  Win32 backend  =================================== */
  /* ======================================================================== */
-@@ -792,6 +810,41 @@ static ULONG mode_to_xbox_attrs(mode_t m)
+@@ -229,6 +250,33 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+     return STATUS_SUCCESS;
+ }
+ 
++/* Temporary probe: which guest function reads which file, and how much.
++ * SSX3_READLOG=1 turns it on; the caller VA comes from the kernel bridge. */
++extern RECOMP_TLS uint32_t g_xbox_kernel_caller;
++
++static int readlog_on(void)
++{
++    static int on = -1;
++    if (on < 0)
++        on = getenv("SSX3_READLOG") ? 1 : 0;
++    return on;
++}
++
++static void readlog_note(HANDLE h, ULONG len, PLARGE_INTEGER off)
++{
++    char name[520];
++    DWORD n;
++
++    if (!readlog_on())
++        return;
++    n = GetFinalPathNameByHandleA(h, name, sizeof name, FILE_NAME_NORMALIZED);
++    if (!n || n >= sizeof name)
++        return;
++    fprintf(stderr, "RD %s off=%lld len=%u ret=%08X\n", name,
++            off ? (long long)off->QuadPart : -1LL, (unsigned)len,
++            (unsigned)g_xbox_kernel_caller);
++}
++
+ NTSTATUS __stdcall xbox_NtReadFile(
+     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
+     PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length,
+@@ -792,6 +840,41 @@ static ULONG mode_to_xbox_attrs(mode_t m)
      return a;
  }
  
@@ -3313,7 +3387,7 @@ index 42135e0..f63e442 100644
  static NTSTATUS errno_to_status(int e)
  {
      switch (e) {
-@@ -805,6 +858,62 @@ static NTSTATUS errno_to_status(int e)
+@@ -805,6 +888,112 @@ static NTSTATUS errno_to_status(int e)
      }
  }
  
@@ -3331,6 +3405,56 @@ index 42135e0..f63e442 100644
 +/* Defined with the directory-scan state further down; a scan's slot is held
 + * until its directory handle closes (see the note there). */
 +static void dir_context_release(HANDLE h);
++
++#if !defined(_WIN32)
++/* ---- game files that live inside the APK -------------------------------- */
++
++/* kernel_iso.c owns the image; the platform layer owns the handle. These four
++ * functions are the bridge, installed on first use, so a bundled build reads
++ * its disc in place while an imported tree keeps working unchanged. */
++static int disc_open(const char *host_path)
++{
++    if (!xbox_iso_ready(xbox_game_dir()))
++        return -1;
++    if (xbox_iso_is_dir(host_path))
++        return -2;
++    return xbox_iso_open(host_path);
++}
++
++static long long disc_read(int file, void *buf, long long n, long long off)
++{
++    return (long long)xbox_iso_pread(file, buf, (size_t)n, (uint64_t)off);
++}
++
++static long long disc_size(int file)
++{
++    return (long long)xbox_iso_handle_size(file);
++}
++
++static void disc_close(int file)
++{
++    xbox_iso_close(file);
++}
++
++static void iso_prepare(void)
++{
++    static int installed;
++    static const w32_disc_backend backend = { disc_open, disc_read, disc_size, disc_close };
++
++    if (!installed) {
++        w32_set_disc_backend(&backend);
++        installed = 1;
++    }
++    xbox_iso_ready(xbox_game_dir());
++}
++
++/* A handle the file layer can work with: a local file, or a file or
++ * directory that came out of the image. */
++static int handle_ok(HANDLE h)
++{
++    return w32_handle_is_file(h) || w32_handle_is_disc(h);
++}
++#endif
 +
 +/* Resolve OBJECT_ATTRIBUTES to a host path.
 + *
@@ -3376,7 +3500,7 @@ index 42135e0..f63e442 100644
  NTSTATUS __stdcall xbox_NtCreateFile(
      PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
      PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
-@@ -818,13 +927,18 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -818,13 +1007,18 @@ NTSTATUS __stdcall xbox_NtCreateFile(
          return STATUS_INVALID_PARAMETER;
  
      const char* xbox_path = get_xbox_path(ObjectAttributes);
@@ -3397,8 +3521,30 @@ index 42135e0..f63e442 100644
          if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
              mkdir(host_path, 0755);   /* EEXIST is fine */
          fd = open(host_path, O_RDONLY | O_DIRECTORY);
-@@ -835,6 +949,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -833,8 +1027,33 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+     }
+ 
      if (fd < 0) {
++        /* Not on the host filesystem: a bundled build keeps the game's own
++         * files inside the APK and serves them read-only from the mounted
++         * image. Nothing that can write is ever taken from there. */
++        if (!file_access_writes(DesiredAccess)) {
++            iso_prepare();
++            HANDLE disc = w32_open_disc(host_path);
++            if (disc) {
++                *FileHandle = disc;
++                dir_context_release(*FileHandle);
++                if (xbox_file_hook)
++                    xbox_file_hook(xbox_path, 0, (int32_t)STATUS_SUCCESS);
++                if (IoStatusBlock) {
++                    IoStatusBlock->Status = STATUS_SUCCESS;
++                    IoStatusBlock->Information = 1;
++                }
++                XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile: %s -> image handle=%p",
++                           host_path, *FileHandle);
++                return STATUS_SUCCESS;
++            }
++        }
          int e = errno;
          XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile FAILED: %s (errno=%d)", host_path, e);
 +        fprintf(stderr, "  [FILE] host open '%s' failed: %s\n", host_path, strerror(e));
@@ -3409,7 +3555,7 @@ index 42135e0..f63e442 100644
          if (IoStatusBlock) {
              IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
              IoStatusBlock->Information = 0;
-@@ -843,6 +962,16 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -843,6 +1062,16 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      }
  
      *FileHandle = w32_open_handle(fd, host_path);
@@ -3426,9 +3572,43 @@ index 42135e0..f63e442 100644
      if (IoStatusBlock) {
          IoStatusBlock->Status = STATUS_SUCCESS;
          IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
-@@ -907,11 +1036,26 @@ NTSTATUS __stdcall xbox_NtWriteFile(
+@@ -860,16 +1089,15 @@ NTSTATUS __stdcall xbox_NtReadFile(
+     if (!IoStatusBlock)
+         return STATUS_INVALID_PARAMETER;
  
-     ssize_t n = write(fd, Buffer, Length);
+-    int fd = w32_handle_fd(FileHandle);
+-    if (fd < 0) {
++    if (!handle_ok(FileHandle)) {
+         IoStatusBlock->Status = STATUS_INVALID_HANDLE;
+         return STATUS_INVALID_HANDLE;
+     }
+ 
+     if (ByteOffset && ByteOffset->QuadPart >= 0)
+-        lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
++        w32_file_seek(FileHandle, (int64_t)ByteOffset->QuadPart, SEEK_SET);
+ 
+-    ssize_t n = read(fd, Buffer, Length);
++    ssize_t n = w32_file_read(FileHandle, Buffer, Length);
+     if (n < 0) {
+         XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
+         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
+@@ -896,22 +1124,36 @@ NTSTATUS __stdcall xbox_NtWriteFile(
+     if (!IoStatusBlock)
+         return STATUS_INVALID_PARAMETER;
+ 
+-    int fd = w32_handle_fd(FileHandle);
+-    if (fd < 0) {
++    if (!handle_ok(FileHandle)) {
+         IoStatusBlock->Status = STATUS_INVALID_HANDLE;
+         return STATUS_INVALID_HANDLE;
+     }
+ 
+     if (ByteOffset && ByteOffset->QuadPart >= 0)
+-        lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
++        w32_file_seek(FileHandle, (int64_t)ByteOffset->QuadPart, SEEK_SET);
+ 
+-    ssize_t n = write(fd, Buffer, Length);
++    ssize_t n = w32_file_write(FileHandle, Buffer, Length);
      if (n < 0) {
 +        const char *hp = w32_handle_path(FileHandle);
          XBOX_TRACE(XBOX_LOG_FILE, "NtWriteFile(handle=%p) errno=%d", FileHandle, errno);
@@ -3453,7 +3633,7 @@ index 42135e0..f63e442 100644
  
      IoStatusBlock->Status = STATUS_SUCCESS;
      IoStatusBlock->Information = (ULONG_PTR)n;
-@@ -923,6 +1067,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
+@@ -923,6 +1165,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
  {
      XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
      if (Handle && Handle != INVALID_HANDLE_VALUE) {
@@ -3461,7 +3641,7 @@ index 42135e0..f63e442 100644
          CloseHandle(Handle);
          return STATUS_SUCCESS;
      }
-@@ -933,11 +1078,21 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
+@@ -933,11 +1176,28 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
  {
      char host_path[MAX_PATH];
      const char* xbox_path = get_xbox_path(ObjectAttributes);
@@ -3471,6 +3651,13 @@ index 42135e0..f63e442 100644
      XBOX_TRACE(XBOX_LOG_FILE, "NtDeleteFile: %s", host_path);
 -    if (unlink(host_path) == 0) return STATUS_SUCCESS;
 -    if (rmdir(host_path)  == 0) return STATUS_SUCCESS;
++    iso_prepare();
++    if (xbox_iso_find(host_path) >= 0) {
++        /* Read-only by design: the image is the disc, not a scratch copy. */
++        if (file_trace())
++            fprintf(stderr, "  [FILE-T] delete '%s' refused (image)\n", host_path);
++        return STATUS_ACCESS_DENIED;
++    }
 +    if (unlink(host_path) == 0) {
 +        if (file_trace() && (strstr(host_path, "UDATA") || strstr(host_path, "TDATA")))
 +            fprintf(stderr, "  [FILE-T] delete '%s' (file)\n", host_path);
@@ -3486,8 +3673,13 @@ index 42135e0..f63e442 100644
      return STATUS_OBJECT_NAME_NOT_FOUND;
  }
  
-@@ -953,6 +1108,12 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
-     if (fd < 0)
+@@ -949,13 +1209,18 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+     if (!IoStatusBlock || !FileInformation)
+         return STATUS_INVALID_PARAMETER;
+ 
+-    int fd = w32_handle_fd(FileHandle);
+-    if (fd < 0)
++    if (!handle_ok(FileHandle))
          return STATUS_INVALID_HANDLE;
  
 +    if (file_trace()) {
@@ -3498,9 +3690,27 @@ index 42135e0..f63e442 100644
 +
      struct stat st;
      if (FileInformationClass != XboxFilePositionInformation) {
-         if (fstat(fd, &st) != 0)
-@@ -1023,6 +1184,12 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
-     if (fd < 0)
+-        if (fstat(fd, &st) != 0)
++        if (w32_file_stat(FileHandle, &st) != 0)
+             return STATUS_UNSUCCESSFUL;
+     }
+ 
+@@ -984,7 +1249,7 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+         }
+         case XboxFilePositionInformation: {
+             PXBOX_FILE_POSITION_INFORMATION info = (PXBOX_FILE_POSITION_INFORMATION)FileInformation;
+-            off_t pos = lseek(fd, 0, SEEK_CUR);
++            int64_t pos = w32_file_seek(FileHandle, 0, SEEK_CUR);
+             if (pos < 0) return STATUS_UNSUCCESSFUL;
+             info->CurrentByteOffset.QuadPart = pos;
+             IoStatusBlock->Status = STATUS_SUCCESS;
+@@ -1019,21 +1284,28 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+     if (!IoStatusBlock || !FileInformation)
+         return STATUS_INVALID_PARAMETER;
+ 
+-    int fd = w32_handle_fd(FileHandle);
+-    if (fd < 0)
++    if (!handle_ok(FileHandle))
          return STATUS_INVALID_HANDLE;
  
 +    if (file_trace()) {
@@ -3512,7 +3722,22 @@ index 42135e0..f63e442 100644
      switch (FileInformationClass) {
          case XboxFilePositionInformation: {
              PXBOX_FILE_POSITION_INFORMATION info = (PXBOX_FILE_POSITION_INFORMATION)FileInformation;
-@@ -1044,7 +1211,10 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+-            if (lseek(fd, (off_t)info->CurrentByteOffset.QuadPart, SEEK_SET) < 0)
++            if (w32_file_seek(FileHandle, info->CurrentByteOffset.QuadPart, SEEK_SET) < 0)
+                 return STATUS_UNSUCCESSFUL;
+             IoStatusBlock->Status = STATUS_SUCCESS;
+             return STATUS_SUCCESS;
+         }
+         case XboxFileEndOfFileInformation: {
+             PXBOX_FILE_END_OF_FILE_INFORMATION info = (PXBOX_FILE_END_OF_FILE_INFORMATION)FileInformation;
+-            if (ftruncate(fd, (off_t)info->EndOfFile.QuadPart) != 0)
++            if (w32_handle_is_disc(FileHandle))
++                return STATUS_ACCESS_DENIED;      /* the image is the disc */
++            if (ftruncate(w32_handle_fd(FileHandle), (off_t)info->EndOfFile.QuadPart) != 0)
+                 return STATUS_UNSUCCESSFUL;
+             IoStatusBlock->Status = STATUS_SUCCESS;
+             return STATUS_SUCCESS;
+@@ -1044,7 +1316,10 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
               * matches NT "delete on close" semantics exactly. */
              if (info->DeleteFile) {
                  const char* p = w32_handle_path(FileHandle);
@@ -3524,10 +3749,12 @@ index 42135e0..f63e442 100644
              }
              IoStatusBlock->Status = STATUS_SUCCESS;
              return STATUS_SUCCESS;
-@@ -1079,6 +1249,11 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+@@ -1078,7 +1353,12 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+         case XboxFileFsSizeInformation: {
              PXBOX_FILE_FS_SIZE_INFORMATION info = (PXBOX_FILE_FS_SIZE_INFORMATION)FsInformation;
              struct statvfs vfs;
-             int fd = w32_handle_fd(FileHandle);
+-            int fd = w32_handle_fd(FileHandle);
++            int fd = w32_handle_is_disc(FileHandle) ? -1 : w32_handle_fd(FileHandle);
 +            if (file_trace()) {
 +                const char *hp = w32_handle_path(FileHandle);
 +                if (hp && (strstr(hp, "UDATA") || strstr(hp, "TDATA")))
@@ -3536,13 +3763,19 @@ index 42135e0..f63e442 100644
              /* Xbox geometry, not the host's -- see the note on
               * XBOX_SECTORS_PER_CLUSTER above. */
              info->BytesPerSector = XBOX_BYTES_PER_SECTOR;
-@@ -1107,7 +1282,13 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+@@ -1106,8 +1386,18 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+ 
  NTSTATUS __stdcall xbox_NtFlushBuffersFile(HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock)
  {
-     int fd = w32_handle_fd(FileHandle);
+-    int fd = w32_handle_fd(FileHandle);
 -    if (fd >= 0) fsync(fd);
 +    int rc = -1;
-+    if (fd >= 0) rc = fsync(fd);
++    if (w32_handle_is_disc(FileHandle)) {
++        rc = 0;                          /* nothing to flush: read-only image */
++    } else {
++        int fd = w32_handle_fd(FileHandle);
++        if (fd >= 0) rc = fsync(fd);
++    }
 +    if (file_trace()) {
 +        const char *hp = w32_handle_path(FileHandle);
 +        if (hp && (strstr(hp, "UDATA") || strstr(hp, "TDATA")))
@@ -3551,20 +3784,56 @@ index 42135e0..f63e442 100644
      if (IoStatusBlock) {
          IoStatusBlock->Status = STATUS_SUCCESS;
          IoStatusBlock->Information = 0;
-@@ -1125,8 +1306,10 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+@@ -1125,10 +1415,24 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
      if (!FileInformation)
          return STATUS_INVALID_PARAMETER;
      const char* xbox_path = get_xbox_path(ObjectAttributes);
 -    if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
 +    if (!xbox_path || !xbox_translate_obj_path(ObjectAttributes, host_path, MAX_PATH))
          return STATUS_OBJECT_PATH_NOT_FOUND;
+-    if (stat(host_path, &st) != 0)
+-        return STATUS_OBJECT_NAME_NOT_FOUND;
 +    if (file_trace() && (strstr(host_path, "UDATA") || strstr(host_path, "TDATA")))
 +        fprintf(stderr, "  [FILE-T] attrs '%s'\n", host_path);
-     if (stat(host_path, &st) != 0)
-         return STATUS_OBJECT_NAME_NOT_FOUND;
++    if (stat(host_path, &st) != 0) {
++        /* Game files inside a bundled APK are not on the host filesystem. */
++        iso_prepare();
++        if (xbox_iso_find(host_path) < 0)
++            return STATUS_OBJECT_NAME_NOT_FOUND;
++        memset(&st, 0, sizeof st);
++        st.st_nlink = 1;
++        if (xbox_iso_is_dir(host_path)) {
++            st.st_mode = S_IFDIR | 0555;
++        } else {
++            st.st_mode = S_IFREG | 0444;
++            st.st_size = (off_t)xbox_iso_size(host_path);
++        }
++    }
  
-@@ -1148,10 +1331,67 @@ typedef struct {
+     unix_to_filetime(st.st_ctime, 0, &FileInformation->CreationTime);
+     unix_to_filetime(st.st_atime, 0, &FileInformation->LastAccessTime);
+@@ -1140,18 +1444,168 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+     return STATUS_SUCCESS;
+ }
+ 
+-/* Directory enumeration state, keyed by the directory's Nt handle. */
++/* Directory enumeration state, keyed by the directory's Nt handle. A scan is
++ * a snapshot taken when it starts: what the host directory holds, plus -- for
++ * a build whose game files live inside the APK -- what the mounted image
++ * holds. */
+ #define MAX_DIR_CONTEXTS 64
+ typedef struct {
+     HANDLE handle;
+-    DIR*   dir;
      char   pattern[64];
++    struct dir_ent {
++        char     name[256];
++        uint32_t size;
++        int64_t  mtime;
++        int      isdir;
++    }     *ent;                 /* snapshot; NULL when no scan is open */
++    int    count;
++    int    next;
  } DIR_CONTEXT;
  
 +/* Case-insensitive glob for one path component, with the two '*' and '?'
@@ -3617,9 +3886,10 @@ index 42135e0..f63e442 100644
 +    EnterCriticalSection(&s_dir_cs);
 +    for (int i = 0; i < MAX_DIR_CONTEXTS; i++) {
 +        if (s_dir_contexts[i].handle == h) {
-+            if (s_dir_contexts[i].dir)
-+                closedir(s_dir_contexts[i].dir);
-+            s_dir_contexts[i].dir = NULL;
++            free(s_dir_contexts[i].ent);
++            s_dir_contexts[i].ent    = NULL;
++            s_dir_contexts[i].count  = 0;
++            s_dir_contexts[i].next   = 0;
 +            s_dir_contexts[i].handle = NULL;
 +            s_dir_contexts[i].pattern[0] = '\0';
 +            break;
@@ -3628,10 +3898,92 @@ index 42135e0..f63e442 100644
 +    LeaveCriticalSection(&s_dir_cs);
 +}
 +
++#define DIR_SCAN_MAX 512
++
++static int dir_scan_add(DIR_CONTEXT *ctx, const char *name, uint32_t size,
++                        int64_t mtime, int isdir)
++{
++    int i;
++
++    if (ctx->count >= DIR_SCAN_MAX)
++        return -1;
++    if (strlen(name) >= sizeof ctx->ent[0].name)
++        return -1;
++    for (i = 0; i < ctx->count; i++)
++        if (!strcasecmp(ctx->ent[i].name, name))
++            return 0;                 /* the host's copy of a name wins */
++    snprintf(ctx->ent[ctx->count].name, sizeof ctx->ent[0].name, "%s", name);
++    ctx->ent[ctx->count].size  = size;
++    ctx->ent[ctx->count].mtime = mtime;
++    ctx->ent[ctx->count].isdir = isdir;
++    ctx->count++;
++    return 0;
++}
++
++typedef struct {
++    DIR_CONTEXT *ctx;
++    const char  *pattern;
++} dir_scan_state;
++
++static void dir_scan_image_ent(void *user, const char *name, uint64_t size, int isdir)
++{
++    dir_scan_state *st = (dir_scan_state *)user;
++
++    if (dir_glob_match(st->pattern, name))
++        dir_scan_add(st->ctx, name, (uint32_t)size, 0, isdir);
++}
++
++/* Build the snapshot for one scan. Host entries are added first, so a file the
++ * title wrote over a name the image also carries still reads back its own
++ * bytes; image entries follow and never replace one. 0 when the directory
++ * exists in either place. */
++static int dir_scan_build(DIR_CONTEXT *ctx, const char *path)
++{
++    DIR *d;
++    struct dirent *de;
++    dir_scan_state st;
++    int any = 0;
++
++    free(ctx->ent);
++    ctx->ent = (struct dir_ent *)calloc(DIR_SCAN_MAX, sizeof *ctx->ent);
++    ctx->count = 0;
++    ctx->next  = 0;
++    if (!ctx->ent)
++        return -1;
++
++    d = opendir(path);
++    if (d) {
++        any = 1;
++        while ((de = readdir(d)) != NULL) {
++            char full[MAX_PATH];
++            struct stat sb;
++
++            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
++                continue;
++            if (!dir_glob_match(ctx->pattern, de->d_name))
++                continue;
++            memset(&sb, 0, sizeof sb);
++            snprintf(full, sizeof full, "%s/%s", path, de->d_name);
++            if (stat(full, &sb) != 0)
++                memset(&sb, 0, sizeof sb);
++            dir_scan_add(ctx, de->d_name, (uint32_t)sb.st_size, (int64_t)sb.st_mtime,
++                         S_ISDIR(sb.st_mode));
++        }
++        closedir(d);
++    }
++
++    iso_prepare();
++    st.ctx     = ctx;
++    st.pattern = ctx->pattern;
++    if (xbox_iso_list(path, dir_scan_image_ent, &st) > 0)
++        any = 1;
++    return any ? 0 : -1;
++}
++
  NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
      PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation, ULONG Length,
-@@ -1170,6 +1410,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1170,6 +1624,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      if (!s_dir_cs_init) { InitializeCriticalSection(&s_dir_cs); s_dir_cs_init = TRUE; }
      EnterCriticalSection(&s_dir_cs);
  
@@ -3647,7 +3999,7 @@ index 42135e0..f63e442 100644
      /* Locate or create the per-handle enumeration context. */
      DIR_CONTEXT* ctx = NULL;
      for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
-@@ -1177,12 +1426,19 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1177,21 +1640,21 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      if (!ctx) {
          for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
              if (s_dir_contexts[i].handle == NULL) { ctx = &s_dir_contexts[i]; break; }
@@ -3660,32 +4012,106 @@ index 42135e0..f63e442 100644
 +            return STATUS_INSUFFICIENT_RESOURCES;
 +        }
          ctx->handle = FileHandle;
-         ctx->dir = NULL;
+-        ctx->dir = NULL;
++        ctx->ent    = NULL;
      }
  
 -    if (RestartScan || ctx->dir == NULL) {
-+    if (RestartScan || ctx->dir == NULL ||
+-        if (ctx->dir) { closedir(ctx->dir); ctx->dir = NULL; }
++    if (RestartScan || ctx->ent == NULL ||
 +        (FileName && FileName->Buffer && FileName->Length > 0)) {
-         if (ctx->dir) { closedir(ctx->dir); ctx->dir = NULL; }
          const char* dpath = w32_handle_path(FileHandle);
          if (!dpath) { LeaveCriticalSection(&s_dir_cs); return STATUS_UNSUCCESSFUL; }
-@@ -1218,8 +1474,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+-        ctx->dir = opendir(dpath);
+-        if (!ctx->dir) {
+-            LeaveCriticalSection(&s_dir_cs);
+-            IoStatusBlock->Status = STATUS_NO_MORE_FILES;
+-            return STATUS_NO_MORE_FILES;
+-        }
+         if (FileName && FileName->Buffer && FileName->Length > 0) {
+             USHORT n = FileName->Length;
+             if (n >= sizeof(ctx->pattern)) n = sizeof(ctx->pattern) - 1;
+@@ -1200,52 +1663,52 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+         } else {
+             strcpy(ctx->pattern, "*");
          }
-         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
-             continue;
+-    }
+-
+-    /* Advance to the next entry matching the search pattern. */
+-    struct dirent* de;
+-    const char* dpath = w32_handle_path(FileHandle);
+-    struct stat st;
+-    for (;;) {
+-        de = readdir(ctx->dir);
+-        if (!de) {
+-            closedir(ctx->dir);
+-            ctx->dir = NULL;
+-            ctx->handle = NULL;
++        if (dir_scan_build(ctx, dpath) != 0) {
+             LeaveCriticalSection(&s_dir_cs);
+             IoStatusBlock->Status = STATUS_NO_MORE_FILES;
+             return STATUS_NO_MORE_FILES;
+         }
+-        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+-            continue;
 -        if (fnmatch(ctx->pattern, de->d_name, FNM_CASEFOLD) == 0)
-+        if (dir_glob_match(ctx->pattern, de->d_name)) {
-+            if (file_trace()) {
-+                const char *dp = w32_handle_path(FileHandle);
-+                if (dp && (strstr(dp, "UDATA") || strstr(dp, "TDATA")))
-+                    fprintf(stderr, "  [FILE-T] list '%s' pat='%s' -> '%s'\n",
-+                            dp, ctx->pattern, de->d_name);
-+            }
-             break;
-+        }
+-            break;
      }
  
-     char full[MAX_PATH];
+-    char full[MAX_PATH];
+-    snprintf(full, sizeof(full), "%s/%s", dpath ? dpath : ".", de->d_name);
+-    if (stat(full, &st) != 0)
+-        memset(&st, 0, sizeof(st));
++    if (ctx->next >= ctx->count) {
++        LeaveCriticalSection(&s_dir_cs);
++        IoStatusBlock->Status = STATUS_NO_MORE_FILES;
++        return STATUS_NO_MORE_FILES;
++    }
++
++    struct dir_ent* e = &ctx->ent[ctx->next++];
++    if (file_trace()) {
++        const char *dp = w32_handle_path(FileHandle);
++        if (dp && (strstr(dp, "UDATA") || strstr(dp, "TDATA")))
++            fprintf(stderr, "  [FILE-T] list '%s' pat='%s' -> '%s'\n",
++                    dp, ctx->pattern, e->name);
++    }
++    uint32_t ent_size = e->size;
++    int64_t  ent_time = e->mtime;
++    int      ent_dir  = e->isdir;
++    char     ent_name[256];
++    memcpy(ent_name, e->name, sizeof ent_name);
+     LeaveCriticalSection(&s_dir_cs);
+ 
+     PXBOX_FILE_DIRECTORY_INFORMATION entry = (PXBOX_FILE_DIRECTORY_INFORMATION)FileInformation;
+     memset(entry, 0, Length);
+ 
+-    int name_len = (int)strlen(de->d_name);
++    int name_len = (int)strlen(ent_name);
+     entry->NextEntryOffset = 0;
+     entry->FileIndex = 0;
+-    unix_to_filetime(st.st_ctime, 0, &entry->CreationTime);
+-    unix_to_filetime(st.st_atime, 0, &entry->LastAccessTime);
+-    unix_to_filetime(st.st_mtime, 0, &entry->LastWriteTime);
++    unix_to_filetime((time_t)ent_time, 0, &entry->CreationTime);
++    unix_to_filetime((time_t)ent_time, 0, &entry->LastAccessTime);
++    unix_to_filetime((time_t)ent_time, 0, &entry->LastWriteTime);
+     entry->ChangeTime = entry->LastWriteTime;
+-    entry->EndOfFile.QuadPart = st.st_size;
+-    entry->AllocationSize.QuadPart = (st.st_size + 4095) & ~4095LL;
+-    entry->FileAttributes = mode_to_xbox_attrs(st.st_mode);
++    entry->EndOfFile.QuadPart = ent_size;
++    entry->AllocationSize.QuadPart = (ent_size + 4095) & ~4095LL;
++    entry->FileAttributes = ent_dir ? XBOX_FILE_ATTRIBUTE_DIRECTORY
++                                    : XBOX_FILE_ATTRIBUTE_NORMAL;
+     entry->FileNameLength = name_len;
+ 
+     ULONG header_size = (ULONG)((ULONG_PTR)&((PXBOX_FILE_DIRECTORY_INFORMATION)0)->FileName);
+     if (name_len > 0 && (header_size + (ULONG)name_len) <= Length)
+-        memcpy(entry->FileName, de->d_name, name_len);
++        memcpy(entry->FileName, ent_name, name_len);
+     IoStatusBlock->Status = STATUS_SUCCESS;
+     IoStatusBlock->Information = header_size + name_len;
+     return STATUS_SUCCESS;
 diff --git a/src/kernel/kernel_hal.c b/src/kernel/kernel_hal.c
 index 1ad4fff..7ba275f 100644
 --- a/src/kernel/kernel_hal.c
@@ -3792,8 +4218,739 @@ index 1ad4fff..7ba275f 100644
      ExitProcess(0);
  }
  
+diff --git a/src/kernel/kernel_iso.c b/src/kernel/kernel_iso.c
+new file mode 100644
+index 0000000..0f08cb1
+--- /dev/null
++++ b/src/kernel/kernel_iso.c
+@@ -0,0 +1,666 @@
++/* A disc image mounted read-only underneath the game directory.
++ *
++ * See kernel_iso.h for what this is for. Two things about the shape are worth
++ * knowing before reading the code:
++ *
++ *   - The mount point is discovered, not passed in: <game_dir>/.disc.mount
++ *     lists the payload's descriptors, because a bundled launcher can hand a
++ *     descriptor to the process but cannot set the process environment before
++ *     the library is loaded. The mount file's own directory is the prefix that
++ *     maps "data/audio/music.big" onto a host path.
++ *   - The image is split into parts. An entry of an APK is addressed with the
++ *     zip format's 32-bit offsets, so the payload is cut below 2 GiB and reads
++ *     are stitched across the seam here; nothing above this file knows.
++ *
++ * The filesystem is XDVDFS, read with the same B-tree walk as the port's
++ * extractor (src/android/xiso.c) and flattened into a path index at mount time.
++ */
++#include "kernel_iso.h"
++
++#include <ctype.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#if defined(_WIN32)
++/* The Windows build never mounts an image; this shim exists so tests/iso can
++ * exercise the parser on a host that has no pread(). */
++#include <io.h>
++#include <direct.h>
++#ifndef F_OK
++#define F_OK 0            /* MSVC spells it in <io.h> without the flag */
++#endif
++#define iso_strcasecmp _stricmp
++static long long iso_pread(int fd, void *buf, size_t n, long long off)
++{
++    if (_lseeki64(fd, off, SEEK_SET) != off)
++        return -1;
++    return (long long)_read(fd, buf, (unsigned)n);
++}
++#else
++#include <sys/types.h>
++#include <unistd.h>
++#include <strings.h>
++#define iso_strcasecmp strcasecmp
++#define iso_pread(fd, buf, n, off) pread((fd), (buf), (n), (off_t)(off))
++#endif
++
++#define ISO_SECTOR      2048u
++#define ISO_MAX_PARTS   8
++#define ISO_MAX_ENTRIES 16384
++#define ISO_MAX_DEPTH   12
++#define ISO_MAX_TABLE   (4u << 20)
++#define ISO_MAX_HANDLES 64
++
++static const unsigned char iso_magic[20] = {
++    'M','I','C','R','O','S','O','F','T','*','X','B','O','X','*','M','E','D','I','A'
++};
++
++typedef struct {
++    int      fd;
++    uint64_t off;      /* offset of this part inside the host file */
++    uint64_t len;
++    uint64_t start;    /* offset of this part inside the image */
++} iso_part;
++
++typedef struct {
++    char    *path;     /* "data/audio/music.big"; "" is the root */
++    uint64_t off;      /* image offset of the file's first byte */
++    uint32_t size;
++    int      isdir;
++} iso_entry;
++
++typedef struct {
++    int      used;
++    int      entry;    /* index of the file's entry, or the directory's */
++} iso_handle;
++
++static struct {
++    int        state;      /* 0 = not tried, 1 = mounted, 2 = no mount file */
++    char       prefix[1024];
++    iso_part   part[ISO_MAX_PARTS];
++    int        npart;
++    uint64_t   image_size;
++    iso_entry *ent;
++    int        nent;
++    iso_handle handle[ISO_MAX_HANDLES];
++} s_iso;
++
++/* ---------------------------------------------------------------- reading */
++
++static int img_read(void *dst, size_t n, uint64_t off)
++{
++    unsigned char *p = (unsigned char *)dst;
++
++    if (n == 0)
++        return 0;
++    if (off > s_iso.image_size || n > s_iso.image_size - off)
++        return -1;
++    while (n > 0) {
++        int i;
++        uint64_t rel, avail;
++        size_t take;
++
++        for (i = 0; i < s_iso.npart; i++)
++            if (off >= s_iso.part[i].start && off < s_iso.part[i].start + s_iso.part[i].len)
++                break;
++        if (i == s_iso.npart)
++            return -1;
++        rel = off - s_iso.part[i].start;
++        avail = s_iso.part[i].len - rel;
++        take = (uint64_t)n < avail ? n : (size_t)avail;
++        if (iso_pread(s_iso.part[i].fd, p, take, (long long)(s_iso.part[i].off + rel)) !=
++            (long long)take)
++            return -1;
++        p += take;
++        off += take;
++        n -= take;
++    }
++    return 0;
++}
++
++static uint16_t rd16(const unsigned char *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
++
++static uint32_t rd32(const unsigned char *p)
++{
++    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
++           ((uint32_t)p[3] << 24);
++}
++
++/* A name we are willing to put in the index. The image is untrusted input and
++ * this index is what the guest's paths are matched against. */
++static int name_ok(const char *name, size_t len)
++{
++    size_t i;
++
++    if (len == 0 || len >= 250)
++        return 0;
++    if ((len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.'))
++        return 0;
++    for (i = 0; i < len; i++) {
++        unsigned char ch = (unsigned char)name[i];
++        if (ch == '/' || ch == '\\' || ch == ':' || ch < 0x20 || ch == 0x7f)
++            return 0;
++    }
++    return 1;
++}
++
++static int add_entry(const char *path, uint64_t off, uint32_t size, int isdir)
++{
++    char *copy;
++
++    if (s_iso.nent >= ISO_MAX_ENTRIES)
++        return -1;
++    copy = (char *)malloc(strlen(path) + 1);
++    if (!copy)
++        return -1;
++    strcpy(copy, path);
++    s_iso.ent[s_iso.nent].path  = copy;
++    s_iso.ent[s_iso.nent].off   = off;
++    s_iso.ent[s_iso.nent].size  = size;
++    s_iso.ent[s_iso.nent].isdir = isdir;
++    s_iso.nent++;
++    return 0;
++}
++
++static int walk_dir(uint32_t dir_start, uint32_t dir_size, const char *prefix,
++                    uint64_t base, int depth);
++
++/* One directory table: a B-tree of dirents, `off` being a byte offset inside
++ * `table`. left/right are in 4-byte units from the start of the same table. */
++static int walk_table(const unsigned char *table, uint32_t table_size, uint32_t off,
++                      unsigned char *seen, const char *prefix, uint64_t base, int depth)
++{
++    uint16_t left, right;
++    uint32_t start, size;
++    unsigned char attrs, namelen;
++    char name[256];
++    char path[1200];
++    int is_dir;
++
++    if (off + 14 > table_size || seen[off / 4])
++        return 0;
++    seen[off / 4] = 1;
++
++    left    = rd16(table + off);
++    right   = rd16(table + off + 2);
++    start   = rd32(table + off + 4);
++    size    = rd32(table + off + 8);
++    attrs   = table[off + 12];
++    namelen = table[off + 13];
++
++    if (namelen && off + 14u + namelen <= table_size &&
++        name_ok((const char *)table + off + 14, namelen)) {
++        memcpy(name, table + off + 14, namelen);
++        name[namelen] = '\0';
++        is_dir = (attrs & 0x10) != 0;
++        if (*prefix)
++            snprintf(path, sizeof path, "%s/%s", prefix, name);
++        else
++            snprintf(path, sizeof path, "%s", name);
++        if (add_entry(path, base + (uint64_t)start * ISO_SECTOR, size, is_dir) != 0)
++            return -1;
++        if (is_dir && walk_dir(start, size, path, base, depth + 1) != 0)
++            return -1;
++    }
++
++    if (left && walk_table(table, table_size, left * 4u, seen, prefix, base, depth) != 0)
++        return -1;
++    if (right && walk_table(table, table_size, right * 4u, seen, prefix, base, depth) != 0)
++        return -1;
++    return 0;
++}
++
++static int walk_dir(uint32_t dir_start, uint32_t dir_size, const char *prefix,
++                    uint64_t base, int depth)
++{
++    unsigned char *table, *seen;
++    int rc;
++
++    if (depth > ISO_MAX_DEPTH)
++        return 0;                      /* malformed image: stop descending */
++    if (dir_size == 0)
++        return 0;
++    if (dir_size > ISO_MAX_TABLE)
++        return -1;
++
++    table = (unsigned char *)malloc(dir_size);
++    seen  = (unsigned char *)calloc(dir_size / 4 + 1, 1);
++    if (!table || !seen) {
++        free(table);
++        free(seen);
++        return -1;
++    }
++    rc = 0;
++    if (img_read(table, dir_size, base + (uint64_t)dir_start * ISO_SECTOR) != 0 ||
++        walk_table(table, dir_size, 0, seen, prefix, base, depth) != 0)
++        rc = -1;
++    free(table);
++    free(seen);
++    return rc;
++}
++
++/* The volume descriptor: a trimmed image has it at 0x10000, a redump-style
++ * image behind the 405 MiB video partition. Sector numbers in the dirents are
++ * relative to the descriptor minus one sector. */
++static int find_root(uint64_t *root_start, uint32_t *root_size, uint64_t *base)
++{
++    static const uint64_t candidate[2] = { 0x10000ull, 0x18300000ull + 0x10000ull };
++    unsigned char vd[ISO_SECTOR];
++    int i;
++
++    for (i = 0; i < 2; i++) {
++        if (s_iso.image_size < candidate[i] + ISO_SECTOR)
++            continue;
++        if (img_read(vd, sizeof vd, candidate[i]) != 0)
++            continue;
++        if (memcmp(vd, iso_magic, sizeof iso_magic) != 0)
++            continue;
++        *root_start = rd32(vd + 20);
++        *root_size  = rd32(vd + 24);
++        *base       = candidate[i] - 0x10000u;
++        return 0;
++    }
++    return -1;
++}
++
++/* ---------------------------------------------------------------- mounting */
++
++/* "fd off len" or "fd,off,len". */
++static int parse_part(const char *value)
++{
++    char buf[128];
++    char *field[3];
++    int n = 0;
++    char *p;
++
++    if (strlen(value) >= sizeof buf)
++        return -1;
++    strcpy(buf, value);
++    for (p = buf; *p && n < 3; ) {
++        char *start;
++        while (*p == ' ' || *p == ',' || *p == '\t')
++            p++;
++        if (!*p)
++            break;
++        start = p;
++        while (*p && *p != ' ' && *p != ',' && *p != '\t')
++            p++;
++        if (*p)
++            *p++ = '\0';
++        field[n++] = start;
++    }
++    if (n != 3 || s_iso.npart >= ISO_MAX_PARTS)
++        return -1;
++    s_iso.part[s_iso.npart].fd    = atoi(field[0]);
++    s_iso.part[s_iso.npart].off   = strtoull(field[1], NULL, 10);
++    s_iso.part[s_iso.npart].len   = strtoull(field[2], NULL, 10);
++    s_iso.part[s_iso.npart].start = s_iso.image_size;
++    if (s_iso.part[s_iso.npart].fd < 0 || s_iso.part[s_iso.npart].len == 0)
++        return -1;
++    s_iso.image_size += s_iso.part[s_iso.npart].len;
++    s_iso.npart++;
++    return 0;
++}
++
++static int mount_file(const char *game_dir)
++{
++    char path[1200], line[1600];
++    FILE *f;
++    int mounted = 0;
++
++    snprintf(path, sizeof path, "%s/.disc.mount", game_dir);
++    f = fopen(path, "r");
++    if (!f)
++        return 0;
++    snprintf(s_iso.prefix, sizeof s_iso.prefix, "%s", game_dir);
++    while (fgets(line, sizeof line, f)) {
++        char *p = line, *key, *eq, *val, *end;
++
++        while (*p == ' ' || *p == '\t')
++            p++;
++        if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0')
++            continue;
++        eq = strchr(p, '=');
++        if (!eq)
++            continue;
++        *eq = '\0';
++        key = p;
++        for (end = key + strlen(key); end > key &&
++             (end[-1] == ' ' || end[-1] == '\t'); )
++            *--end = '\0';
++        val = eq + 1;
++        while (*val == ' ' || *val == '\t')
++            val++;
++        end = val + strlen(val);
++        while (end > val && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' ||
++                             end[-1] == '\t'))
++            *--end = '\0';
++        if (!iso_strcasecmp(key, "PREFIX")) {
++            if (*val)
++                snprintf(s_iso.prefix, sizeof s_iso.prefix, "%s", val);
++        } else if (!iso_strcasecmp(key, "PART")) {
++            if (parse_part(val) == 0)
++                mounted = 1;
++        }
++    }
++    fclose(f);
++    return mounted ? 1 : 0;
++}
++
++static void free_index(void)
++{
++    int i;
++
++    for (i = 0; i < s_iso.nent; i++)
++        free(s_iso.ent[i].path);
++    free(s_iso.ent);
++    s_iso.ent  = NULL;
++    s_iso.nent = 0;
++}
++
++int xbox_iso_ready(const char *game_dir)
++{
++    uint64_t root_start = 0, base = 0;
++    uint32_t root_size = 0;
++    size_t prefix_len;
++
++    if (s_iso.state == 2)
++        return 0;
++    if (s_iso.state == 1)
++        return 1;
++
++    s_iso.state = 2;
++    if (!game_dir || !game_dir[0])
++        return 0;
++    if (!mount_file(game_dir))
++        return 0;                     /* the usual case: nothing bundled */
++    if (find_root(&root_start, &root_size, &base) != 0) {
++        fprintf(stderr, "[ISO] no Xbox filesystem in the %d part(s) mounted "
++                        "from %s/.disc.mount\n", s_iso.npart, game_dir);
++        return 0;
++    }
++
++    prefix_len = strlen(s_iso.prefix);
++    while (prefix_len > 1 && s_iso.prefix[prefix_len - 1] == '/')
++        s_iso.prefix[--prefix_len] = '\0';
++
++    s_iso.ent = (iso_entry *)calloc(ISO_MAX_ENTRIES, sizeof(iso_entry));
++    if (!s_iso.ent)
++        return 0;
++    if (add_entry("", base + (uint64_t)root_start * ISO_SECTOR, root_size, 1) != 0 ||
++        walk_dir((uint32_t)root_start, root_size, "", base, 0) != 0) {
++        fprintf(stderr, "[ISO] the directory tree could not be read\n");
++        free_index();
++        return 0;
++    }
++
++    s_iso.state = 1;
++    fprintf(stderr, "[ISO] %d file(s) mounted from %d part(s), %llu MB, at %s\n",
++            s_iso.nent - 1, s_iso.npart, (unsigned long long)(s_iso.image_size >> 20),
++            s_iso.prefix);
++    return 1;
++}
++
++/* ---------------------------------------------------------------- lookups */
++
++/* Index of the entry whose path is `rel` (relative to the mount point, no
++ * leading slash). 0 is the root. */
++static int find_rel(const char *rel)
++{
++    int i;
++
++    for (i = 0; i < s_iso.nent; i++)
++        if (!iso_strcasecmp(s_iso.ent[i].path, rel))
++            return i;
++    return -1;
++}
++
++/* The path the guest asked for, minus the mount prefix. NULL when it is
++ * outside the prefix. */
++static const char *strip_prefix(const char *host_path)
++{
++    size_t n = strlen(s_iso.prefix);
++
++    if (strncmp(host_path, s_iso.prefix, n) != 0)
++        return NULL;
++    if (host_path[n] == '\0')
++        return "";
++    if (host_path[n] != '/')
++        return NULL;
++    return host_path + n + 1;
++}
++
++/* Resolve a relative host path against the working directory: the ports probe
++ * their own files as "game/default.xbe", not as an absolute path. */
++static const char *absolute(const char *path, char *buf, size_t cap)
++{
++    char cwd[1024];
++
++    if (path[0] == '/' || path[0] == '\\')
++        return path;
++#if defined(_WIN32)
++    if (path[0] && path[1] == ':')
++        return path;
++#endif
++    if (!getcwd(cwd, sizeof cwd))
++        return NULL;
++    /* getcwd answers with the host's separators (backslashes on Windows); the
++     * mount point is spelled the way the app gives it, always with slashes. */
++    for (char *p = cwd; *p; p++)
++        if (*p == '\\')
++            *p = '/';
++    if (snprintf(buf, cap, "%s/%s", cwd, path) >= (int)cap)
++        return NULL;
++    return buf;
++}
++
++static int find_host(const char *host_path)
++{
++    const char *rel;
++    char clean[1200], abs[1200];
++    size_t i, n = 0;
++
++    if (!host_path || !s_iso.state)
++        return -1;
++    host_path = absolute(host_path, abs, sizeof abs);
++    if (!host_path)
++        return -1;
++    rel = strip_prefix(host_path);
++    if (!rel)
++        return -1;
++    /* Backslashes cannot appear in an index path, and a doubled slash would
++     * miss it: normalise the guest's spelling first. */
++    if (strlen(rel) >= sizeof clean)
++        return -1;
++    for (i = 0; rel[i]; i++) {
++        if (rel[i] == '\\') {
++            if (n + 1 < sizeof clean)
++                clean[n++] = '/';
++        } else if (rel[i] == '/' && n > 0 && clean[n - 1] == '/') {
++            continue;
++        } else if (n + 1 < sizeof clean) {
++            clean[n++] = rel[i];
++        }
++    }
++    clean[n] = '\0';
++    return find_rel(clean);
++}
++
++int xbox_iso_find(const char *host_path)
++{
++    return find_host(host_path);
++}
++
++int xbox_iso_is_dir(const char *host_path)
++{
++    int i = find_host(host_path);
++    return i >= 0 ? s_iso.ent[i].isdir : 0;
++}
++
++uint64_t xbox_iso_size(const char *host_path)
++{
++    int i = find_host(host_path);
++    return i >= 0 ? (uint64_t)s_iso.ent[i].size : 0;
++}
++
++int xbox_iso_open(const char *host_path)
++{
++    int i = find_host(host_path), h;
++
++    if (i < 0 || s_iso.ent[i].isdir)
++        return -1;
++    for (h = 0; h < ISO_MAX_HANDLES; h++) {
++        if (!s_iso.handle[h].used) {
++            s_iso.handle[h].used  = 1;
++            s_iso.handle[h].entry = i;
++            return h;
++        }
++    }
++    fprintf(stderr, "[ISO] out of file handles (%d in use)\n", ISO_MAX_HANDLES);
++    return -1;
++}
++
++int64_t xbox_iso_pread(int handle, void *buf, size_t n, uint64_t off)
++{
++    iso_entry *e;
++
++    if (handle < 0 || handle >= ISO_MAX_HANDLES || !s_iso.handle[handle].used)
++        return -1;
++    e = &s_iso.ent[s_iso.handle[handle].entry];
++    if (off >= e->size)
++        return 0;
++    if (n > e->size - off)
++        n = (size_t)(e->size - off);
++    if (img_read(buf, n, e->off + off) != 0)
++        return -1;
++    return (int64_t)n;
++}
++
++uint64_t xbox_iso_handle_size(int handle)
++{
++    if (handle < 0 || handle >= ISO_MAX_HANDLES || !s_iso.handle[handle].used)
++        return 0;
++    return s_iso.ent[s_iso.handle[handle].entry].size;
++}
++
++void xbox_iso_close(int handle)
++{
++    if (handle >= 0 && handle < ISO_MAX_HANDLES)
++        s_iso.handle[handle].used = 0;
++}
++
++/* --------------------------------------------------------- whole-file read */
++
++/* The kernel path layer owns the mount point; kernel_iso.c only needs to ask
++ * it where the game directory is. Declared here rather than by including
++ * kernel.h, which this file compiles without on the host test. */
++extern const char *xbox_game_dir(void);
++
++int xbox_game_file_exists(const char *host_path)
++{
++    if (!host_path || !host_path[0])
++        return 0;
++    if (access(host_path, F_OK) == 0)
++        return 1;
++    return xbox_iso_ready(xbox_game_dir()) && xbox_iso_find(host_path) >= 0;
++}
++
++int xbox_read_game_file(const char *host_path, void **data, size_t *size)
++{
++    FILE *f;
++    long n;
++    unsigned char *buf;
++
++    if (!host_path || !data || !size)
++        return 0;
++    f = fopen(host_path, "rb");
++    if (f) {
++        fseek(f, 0, SEEK_END);
++        n = ftell(f);
++        fseek(f, 0, SEEK_SET);
++        if (n > 0) {
++            buf = (unsigned char *)malloc((size_t)n);
++            if (buf && fread(buf, 1, (size_t)n, f) == (size_t)n) {
++                fclose(f);
++                *data = buf;
++                *size = (size_t)n;
++                return 1;
++            }
++            free(buf);
++        }
++        fclose(f);
++    }
++
++#if !defined(_WIN32)
++    {
++        int h;
++        uint64_t len;
++
++        if (!xbox_iso_ready(xbox_game_dir()))
++            return 0;
++        h = xbox_iso_open(host_path);
++        if (h < 0)
++            return 0;
++        len = xbox_iso_handle_size(h);
++        buf = (unsigned char *)malloc((size_t)len ? (size_t)len : 1);
++        if (!buf || (len && xbox_iso_pread(h, buf, (size_t)len, 0) != (int64_t)len)) {
++            free(buf);
++            xbox_iso_close(h);
++            return 0;
++        }
++        xbox_iso_close(h);
++        *data = buf;
++        *size = (size_t)len;
++        return 1;
++    }
++#else
++    return 0;
++#endif
++}
++
++/* ------------------------------------------------------------- enumerate */
++
++int xbox_iso_list(const char *host_dir, xbox_iso_ent_fn cb, void *user)
++{
++    const char *rel;
++    char clean[1200], abs[1200];
++    size_t i, n = 0, plen;
++    int count = 0;
++
++    if (!host_dir || !s_iso.state || !cb)
++        return -1;
++    host_dir = absolute(host_dir, abs, sizeof abs);
++    if (!host_dir)
++        return -1;
++    rel = strip_prefix(host_dir);
++    if (!rel)
++        return -1;
++    if (strlen(rel) >= sizeof clean)
++        return -1;
++    for (i = 0; rel[i]; i++) {
++        if (rel[i] == '\\') {
++            clean[n++] = '/';
++        } else if (rel[i] == '/' && n > 0 && clean[n - 1] == '/') {
++            continue;
++        } else {
++            clean[n++] = rel[i];
++        }
++    }
++    clean[n] = '\0';
++
++    plen = strlen(clean);
++    for (i = 1; i < (size_t)s_iso.nent; i++) {      /* 0 is the root itself */
++        const char *p = s_iso.ent[i].path;
++        if (plen) {
++            if (strncmp(p, clean, plen) != 0 || p[plen] != '/')
++                continue;
++            p += plen + 1;
++        }
++        if (!*p || strchr(p, '/'))
++            continue;                               /* a child directory's file */
++        cb(user, p, s_iso.ent[i].size, s_iso.ent[i].isdir);
++        count++;
++    }
++    return count;
++}
+diff --git a/src/kernel/kernel_iso.h b/src/kernel/kernel_iso.h
+new file mode 100644
+index 0000000..016d2b1
+--- /dev/null
++++ b/src/kernel/kernel_iso.h
+@@ -0,0 +1,53 @@
++/* A disc image mounted read-only underneath the game directory.
++ *
++ * A bundled APK carries the game's files inside itself, so nothing is
++ * extracted to the device: the launcher opens the payload's descriptors and
++ * leaves them in <game>/.disc.mount, and every path the guest opens that is
++ * not on the host filesystem is served from the image instead.
++ *
++ * The image is one logical XDVDFS disc split into pieces (an APK entry is
++ * addressed with the zip format's 32-bit offsets). It is parsed once, into a
++ * flat path index, so a lookup costs a string compare rather than a B-tree
++ * walk.
++ */
++#ifndef XBOX_KERNEL_ISO_H
++#define XBOX_KERNEL_ISO_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++/* Load <game_dir>/.disc.mount if it exists. Idempotent and cheap after the
++ * first call, so every file entry point may call it. Returns 1 when an image
++ * is mounted. */
++int xbox_iso_ready(const char *game_dir);
++
++/* Resolve a host path (as produced by kernel_path.c, i.e. <game_dir>/...) to
++ * an entry in the image. -1 when it is not there. */
++int xbox_iso_find(const char *host_path);
++
++int      xbox_iso_is_dir(const char *host_path);
++uint64_t xbox_iso_size(const char *host_path);
++
++/* Open for reading. Returns a handle >= 0, or -1 when the path is not in the
++ * image (or names a directory). */
++int  xbox_iso_open(const char *host_path);
++int64_t xbox_iso_pread(int handle, void *buf, size_t n, uint64_t off);
++void xbox_iso_close(int handle);
++uint64_t xbox_iso_handle_size(int handle);
++
++/* 1 when the file is on the host filesystem or in the mounted image. */
++int xbox_game_file_exists(const char *host_path);
++
++/* Read a file that belongs to the game into memory: the host's copy first,
++ * the image second, so a title can load its own XBE (or any other asset) the
++ * same way in an imported tree and in a bundled build. Returns 1 with a
++ * malloc'd buffer the caller frees, 0 when neither has the file. */
++int xbox_read_game_file(const char *host_path, void **data, size_t *size);
++
++/* Directory listing, for NtQueryDirectoryFile. Calls back once per entry in
++ * the image directory named by host_path, with the bare name. Returns the
++ * count, or -1 when that directory is not in the image. */
++typedef void (*xbox_iso_ent_fn)(void *user, const char *name, uint64_t size, int isdir);
++int xbox_iso_list(const char *host_dir, xbox_iso_ent_fn cb, void *user);
++
++#endif /* XBOX_KERNEL_ISO_H */
 diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
-index caf6390..5752bbe 100644
+index caf6390..afe43d2 100644
 --- a/src/kernel/kernel_path.c
 +++ b/src/kernel/kernel_path.c
 @@ -156,6 +156,19 @@ static int resolve_symlink(const char* xbox_path, char* out, size_t out_size)
@@ -3853,7 +5010,31 @@ index caf6390..5752bbe 100644
              sub_dir   = s_rules[i].sub_win;
              goto translate;
          }
-@@ -485,10 +514,15 @@ translate:
+@@ -476,6 +505,23 @@ translate:
+     }
+ }
+ 
++/* Same answer as the POSIX branch below, in the encoding the rest of the code
++ * speaks. Nothing on Windows mounts a disc image today, but xbox_iso.c asks for
++ * the directory on both platforms and a port may want it. */
++const char *xbox_game_dir(void)
++{
++    static char utf8[MAX_PATH];
++
++    if (!s_initialized)
++        xbox_path_init(NULL, NULL);
++    if (!WideCharToMultiByte(CP_UTF8, 0, s_game_dir, -1, utf8, sizeof utf8, NULL, NULL))
++        utf8[0] = '\0';
++    for (char *p = utf8; *p; p++)
++        if (*p == '\\')
++            *p = '/';
++    return utf8;
++}
++
+ /* ======================================================================== */
+ #else /* !_WIN32  -- POSIX / Linux */
+ /* ======================================================================== */
+@@ -485,10 +531,15 @@ translate:
  #include <sys/stat.h>
  #include <sys/types.h>
  #include <errno.h>
@@ -3869,7 +5050,7 @@ index caf6390..5752bbe 100644
  
  /* Strip a single trailing '/' (but never the root '/'). */
  static void strip_trailing_slash(char* s)
-@@ -519,6 +553,8 @@ static void mkdir_p(const char* path)
+@@ -519,6 +570,8 @@ static void mkdir_p(const char* path)
          xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "mkdir %s: %s", tmp, strerror(errno));
  }
  
@@ -3878,7 +5059,7 @@ index caf6390..5752bbe 100644
  void xbox_path_init(const char* game_dir, const char* save_dir)
  {
      if (game_dir) {
-@@ -548,11 +584,191 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
+@@ -548,11 +601,191 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
      strip_trailing_slash(s_game_dir);
      strip_trailing_slash(s_save_dir);
  
@@ -4070,7 +5251,7 @@ index caf6390..5752bbe 100644
  BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, DWORD buf_size)
  {
      const char* remainder = NULL;
-@@ -566,6 +782,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
+@@ -566,6 +799,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
      if (!s_initialized)
          xbox_path_init(NULL, NULL);
  
@@ -4080,7 +5261,7 @@ index caf6390..5752bbe 100644
      {
          char linked[512];
          if (resolve_symlink(xbox_path, linked, sizeof(linked)))
-@@ -577,6 +796,8 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
+@@ -577,6 +813,8 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
          if (skip) {
              remainder = xbox_path + skip;
              base_dir  = s_rules[i].to_save ? s_save_dir : s_game_dir;
@@ -4089,7 +5270,7 @@ index caf6390..5752bbe 100644
              sub_dir   = s_rules[i].sub_posix;
              goto translate;
          }
-@@ -616,6 +837,7 @@ translate:
+@@ -616,9 +854,17 @@ translate:
                  host_path_buf[--n] = '\0';
          }
  
@@ -4097,6 +5278,16 @@ index caf6390..5752bbe 100644
          XBOX_TRACE(XBOX_LOG_PATH, "%s -> %s", xbox_path, host_path_buf);
          return TRUE;
      }
+ }
+ 
++const char *xbox_game_dir(void)
++{
++    if (!s_initialized)
++        xbox_path_init(NULL, NULL);
++    return s_game_dir;
++}
++
+ #endif /* _WIN32 */
 diff --git a/src/kernel/kernel_rtl.c b/src/kernel/kernel_rtl.c
 index 9760735..1f5cc05 100644
 --- a/src/kernel/kernel_rtl.c
@@ -8069,10 +9260,17 @@ index 53f9d3d..f826168 100644
 +
  #endif /* XBOX_MEMORY_LAYOUT_H */
 diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
-index 93288d5..1d1c9e4 100644
+index 93288d5..6a95c0f 100644
 --- a/src/platform/win32_compat.c
 +++ b/src/platform/win32_compat.c
-@@ -35,8 +35,10 @@
+@@ -29,14 +29,17 @@
+ #include <sched.h>
+ #include <fenv.h>
+ #include <sys/mman.h>
++#include <sys/stat.h>
+ #if defined(__APPLE__)
+ #include <sys/sysctl.h>
+ #include <sys/stat.h>
  #include <mach/mach.h>
  #include <mach/mach_vm.h>
  #else
@@ -8083,7 +9281,176 @@ index 93288d5..1d1c9e4 100644
  
  /* ===================================================================== */
  /* Last-error (thread-local)                                             */
-@@ -801,7 +803,14 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
+@@ -305,6 +308,11 @@ typedef struct w32_object {
+     int             fd;
+     SIZE_T          map_size;
+     char           *file_path;
++    /* Bytes served from a mounted read-only image rather than from `fd`:
++     * >= 0 is a file in the image, -2 a directory that only exists there,
++     * -1 an ordinary host file. */
++    int             disc;
++    unsigned long long disc_pos;
+ } w32_object;
+ 
+ /* pseudo handles for "current thread"/"current process" */
+@@ -327,11 +335,25 @@ DWORD GetCurrentProcessId(void) { return (DWORD)getpid(); }
+ HANDLE GetCurrentThread(void)   { return t_self_obj ? (HANDLE)t_self_obj : PSEUDO_CURRENT_THREAD; }
+ HANDLE GetCurrentProcess(void)  { return PSEUDO_CURRENT_PROCESS; }
+ 
++/* ---- read-only image backend (kernel_iso.c) --------------------------- */
++
++static const w32_disc_backend *s_disc;
++
++void w32_set_disc_backend(const w32_disc_backend *backend) { s_disc = backend; }
++
++static void w32_disc_close(int file)
++{
++    if (s_disc && s_disc->close)
++        s_disc->close(file);
++}
++
+ static w32_object *obj_alloc(w32_kind kind)
+ {
+     w32_object *o = (w32_object *)calloc(1, sizeof(w32_object));
+     o->kind     = kind;
+     o->refcount = 1;
++    /* calloc leaves 0, which is a valid image file number. */
++    o->disc     = -1;
+     pthread_mutex_init(&o->lock, NULL);
+     pthread_cond_init(&o->cond, NULL);
+     pthread_cond_init(&o->gate, NULL);
+@@ -344,6 +366,7 @@ static void obj_release(w32_object *o)
+         return;
+     if (o->kind == K_FILE) {
+         if (o->fd >= 0) close(o->fd);
++        if (o->disc >= 0) w32_disc_close(o->disc);
+         free(o->file_path);
+     } else if (o->kind == K_FILEMAP) {
+         if (o->fd >= 0) close(o->fd);
+@@ -377,6 +400,122 @@ const char *w32_handle_path(HANDLE h)
+     return (o && o->kind == K_FILE) ? o->file_path : NULL;
+ }
+ 
++/* ---- file handles: local file, image file, or image directory --------- */
++
++HANDLE w32_open_disc(const char *host_path)
++{
++    w32_object *o;
++    int file;
++
++    if (!s_disc || !s_disc->open || !host_path)
++        return NULL;
++    file = s_disc->open(host_path);
++    if (file < 0 && file != -2)
++        return NULL;
++    o = obj_alloc(K_FILE);
++    o->fd        = -1;
++    o->disc      = file;
++    o->disc_pos  = 0;
++    o->file_path = strdup(host_path);
++    return (HANDLE)o;
++}
++
++int w32_handle_is_file(HANDLE h)
++{
++    w32_object *o = (w32_object *)h;
++    return o && o->kind == K_FILE && (o->fd >= 0 || o->disc >= 0);
++}
++
++int w32_handle_is_disc(HANDLE h)
++{
++    w32_object *o = (w32_object *)h;
++    return o && o->kind == K_FILE && o->disc != -1;
++}
++
++ssize_t w32_file_read(HANDLE h, void *buf, size_t len)
++{
++    w32_object *o = (w32_object *)h;
++    long long n;
++
++    if (!o || o->kind != K_FILE)
++        return -1;
++    if (o->disc == -1)
++        return read(o->fd, buf, len);
++    if (o->disc < 0 || !s_disc || !s_disc->read)
++        return -1;
++    n = s_disc->read(o->disc, buf, (long long)len, (long long)o->disc_pos);
++    if (n > 0)
++        o->disc_pos += (unsigned long long)n;
++    return (ssize_t)n;
++}
++
++ssize_t w32_file_write(HANDLE h, const void *buf, size_t len)
++{
++    w32_object *o = (w32_object *)h;
++
++    if (!o || o->kind != K_FILE || o->disc != -1)
++        return -1;                       /* the image is read-only */
++    return write(o->fd, buf, len);
++}
++
++int64_t w32_file_seek(HANDLE h, int64_t off, int whence)
++{
++    w32_object *o = (w32_object *)h;
++    int64_t base, size;
++
++    if (!o || o->kind != K_FILE)
++        return -1;
++    if (o->disc == -1)
++        return (int64_t)lseek(o->fd, (off_t)off, whence);
++    size = (s_disc && s_disc->size && o->disc >= 0) ? s_disc->size(o->disc) : 0;
++    switch (whence) {
++        case SEEK_SET: base = 0;                      break;
++        case SEEK_CUR: base = (int64_t)o->disc_pos;   break;
++        case SEEK_END: base = size;                   break;
++        default:       return -1;
++    }
++    if (base + off < 0)
++        return -1;
++    o->disc_pos = (unsigned long long)(base + off);
++    return (int64_t)o->disc_pos;
++}
++
++uint64_t w32_file_size(HANDLE h)
++{
++    w32_object *o = (w32_object *)h;
++    struct stat st;
++
++    if (!o || o->kind != K_FILE)
++        return ~0ull;
++    if (o->disc >= 0)
++        return (s_disc && s_disc->size) ? (uint64_t)s_disc->size(o->disc) : 0;
++    if (o->disc == -2)
++        return 0;
++    if (fstat(o->fd, &st) != 0)
++        return ~0ull;
++    return (uint64_t)st.st_size;
++}
++
++int w32_file_stat(HANDLE h, struct stat *st)
++{
++    w32_object *o = (w32_object *)h;
++
++    if (!o || o->kind != K_FILE || !st)
++        return -1;
++    if (o->disc == -1)
++        return fstat(o->fd, st);
++    memset(st, 0, sizeof *st);
++    if (o->disc == -2) {
++        st->st_mode  = S_IFDIR | 0555;
++        st->st_nlink = 2;
++    } else {
++        st->st_mode  = S_IFREG | 0444;
++        st->st_nlink = 1;
++        st->st_size  = (off_t)((s_disc && s_disc->size) ? s_disc->size(o->disc) : 0);
++    }
++    return 0;
++}
++
+ BOOL CloseHandle(HANDLE h)
+ {
+     if (!h || h == PSEUDO_CURRENT_THREAD || h == PSEUDO_CURRENT_PROCESS ||
+@@ -801,7 +940,14 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
  {
      w32_object *o = (w32_object *)h;
      if (!o || o->kind != K_THREAD) return FALSE;
@@ -8098,7 +9465,7 @@ index 93288d5..1d1c9e4 100644
      pthread_mutex_lock(&o->lock);
      o->exit_code = exitCode;
      o->exited    = 1;
-@@ -1271,7 +1280,23 @@ VOID OutputDebugStringA(LPCSTR str)
+@@ -1271,7 +1417,23 @@ VOID OutputDebugStringA(LPCSTR str)
      if (str) fputs(str, stderr);
  }
  
@@ -8122,7 +9489,7 @@ index 93288d5..1d1c9e4 100644
  
  BOOL IsDebuggerPresent(void)
  {
-@@ -1311,6 +1336,11 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
+@@ -1311,6 +1473,11 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
  {
  #if defined(__APPLE__)
      memset_s(ptr, cnt, 0, cnt);
@@ -8134,7 +9501,94 @@ index 93288d5..1d1c9e4 100644
  #else
      explicit_bzero(ptr, cnt);
  #endif
-@@ -1456,7 +1486,11 @@ DWORD XInputGetState(DWORD idx, XINPUT_STATE *state)
+@@ -1358,7 +1525,18 @@ HANDLE CreateFileA(LPCSTR name, DWORD access, DWORD share,
+     snprintf(norm, sizeof(norm), "%s", name);
+     xbox_path_normalize(norm);
+     int fd = open(norm, rw | extra, 0644);
+-    if (fd < 0) { SetLastError(ERROR_FILE_NOT_FOUND); return INVALID_HANDLE_VALUE; }
++    if (fd < 0) {
++        /* Not on the host: the game's own files may be inside a mounted
++         * image instead (kernel_iso.c). Read-only, so an open that wants to
++         * write is left failing. */
++        if (!(extra & (O_CREAT | O_TRUNC)) && rw == O_RDONLY) {
++            HANDLE disc = w32_open_disc(norm);
++            if (disc)
++                return disc;
++        }
++        SetLastError(ERROR_FILE_NOT_FOUND);
++        return INVALID_HANDLE_VALUE;
++    }
+     return w32_open_handle(fd, name);
+ }
+ 
+@@ -1376,9 +1554,8 @@ HANDLE CreateFileW(LPCWSTR name, DWORD access, DWORD share,
+ BOOL ReadFile(HANDLE h, LPVOID buf, DWORD len, LPDWORD nread, void *overlapped)
+ {
+     (void)overlapped;
+-    int fd = w32_handle_fd(h);
+-    if (fd < 0) { if (nread) *nread = 0; SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+-    ssize_t n = read(fd, buf, len);
++    if (!w32_handle_is_file(h)) { if (nread) *nread = 0; SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
++    ssize_t n = w32_file_read(h, buf, len);
+     if (n < 0)  { if (nread) *nread = 0; SetLastError(ERROR_GEN_FAILURE);    return FALSE; }
+     if (nread)  *nread = (DWORD)n;
+     return TRUE;
+@@ -1387,9 +1564,8 @@ BOOL ReadFile(HANDLE h, LPVOID buf, DWORD len, LPDWORD nread, void *overlapped)
+ BOOL WriteFile(HANDLE h, LPCVOID buf, DWORD len, LPDWORD nwritten, void *overlapped)
+ {
+     (void)overlapped;
+-    int fd = w32_handle_fd(h);
+-    if (fd < 0) { if (nwritten) *nwritten = 0; SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+-    ssize_t n = write(fd, buf, len);
++    if (!w32_handle_is_file(h)) { if (nwritten) *nwritten = 0; SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
++    ssize_t n = w32_file_write(h, buf, len);
+     if (n < 0)  { if (nwritten) *nwritten = 0; SetLastError(ERROR_GEN_FAILURE);    return FALSE; }
+     if (nwritten) *nwritten = (DWORD)n;
+     return TRUE;
+@@ -1397,29 +1573,28 @@ BOOL WriteFile(HANDLE h, LPCVOID buf, DWORD len, LPDWORD nwritten, void *overlap
+ 
+ DWORD GetFileSize(HANDLE h, LPDWORD high)
+ {
+-    int fd = w32_handle_fd(h);
+-    if (fd < 0) return INVALID_FILE_SIZE;
+-    struct stat st;
+-    if (fstat(fd, &st) != 0) return INVALID_FILE_SIZE;
+-    if (high) *high = (DWORD)(((uint64_t)st.st_size >> 32) & 0xFFFFFFFFu);
+-    return (DWORD)(st.st_size & 0xFFFFFFFFu);
++    uint64_t size = w32_file_size(h);
++    if (size == ~0ull)
++        return INVALID_FILE_SIZE;
++    if (high) *high = (DWORD)((size >> 32) & 0xFFFFFFFFu);
++    return (DWORD)(size & 0xFFFFFFFFu);
+ }
+ 
+ BOOL GetFileSizeEx(HANDLE h, PLARGE_INTEGER size)
+ {
+-    int fd = w32_handle_fd(h);
+-    if (fd < 0 || !size) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+-    struct stat st;
+-    if (fstat(fd, &st) != 0) { SetLastError(ERROR_GEN_FAILURE); return FALSE; }
+-    size->QuadPart = (LONGLONG)st.st_size;
++    uint64_t bytes = w32_file_size(h);
++    if (bytes == ~0ull || !size) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
++    size->QuadPart = (LONGLONG)bytes;
+     return TRUE;
+ }
+ 
+ BOOL FlushFileBuffers(HANDLE h)
+ {
+-    int fd = w32_handle_fd(h);
+-    if (fd < 0) return FALSE;
+-    return fsync(fd) == 0;
++    if (!w32_handle_is_file(h))
++        return FALSE;
++    if (w32_handle_is_disc(h))
++        return TRUE;                    /* nothing to flush: read-only image */
++    return fsync(w32_handle_fd(h)) == 0;
+ }
+ 
+ /* ===================================================================== */
+@@ -1456,7 +1631,11 @@ DWORD XInputGetState(DWORD idx, XINPUT_STATE *state)
  BOOL TerminateProcess(HANDLE process, UINT exitCode)
  {
      (void)process;
@@ -8146,7 +9600,7 @@ index 93288d5..1d1c9e4 100644
  }
  
  VOID OutputDebugStringW(LPCWSTR str)
-@@ -1781,6 +1815,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+@@ -1781,6 +1960,18 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
      b->ullAvailPhys     = avail;
      b->ullTotalPageFile = b->ullTotalPhys + (ULONGLONG)swap.xsu_total;
      b->ullAvailPageFile = b->ullAvailPhys + (ULONGLONG)swap.xsu_avail;
@@ -8166,10 +9620,41 @@ index 93288d5..1d1c9e4 100644
      struct sysinfo si;
      if (sysinfo(&si) != 0) return FALSE;
 diff --git a/src/platform/win32_compat.h b/src/platform/win32_compat.h
-index 22762ee..4c1a32c 100644
+index 22762ee..412d968 100644
 --- a/src/platform/win32_compat.h
 +++ b/src/platform/win32_compat.h
-@@ -168,6 +168,7 @@ DWORD  GetCurrentProcessId(void);
+@@ -128,6 +128,30 @@ HANDLE      w32_open_handle(int fd, const char *host_path);
+ int         w32_handle_fd(HANDLE h);
+ const char *w32_handle_path(HANDLE h);
+ 
++/* A read-only image can supply files that are not on the host filesystem
++ * (kernel_iso.c mounts a disc carried inside the APK). The kernel registers
++ * the reader; this layer only keeps the handle shape, so the file layer has
++ * one kind of file handle whether the bytes are local or in the image. */
++struct stat;    /* file-scope tag: a prototype's own scope would be a different type */
++
++typedef struct {
++    int       (*open)(const char *host_path);   /* >=0 file, -2 directory, -1 absent */
++    long long (*read)(int file, void *buf, long long n, long long off);
++    long long (*size)(int file);
++    void      (*close)(int file);
++} w32_disc_backend;
++
++void   w32_set_disc_backend(const w32_disc_backend *backend);
++HANDLE w32_open_disc(const char *host_path);    /* NULL when not in the image */
++int    w32_handle_is_file(HANDLE h);            /* real file or image file */
++int    w32_handle_is_disc(HANDLE h);
++
++ssize_t   w32_file_read(HANDLE h, void *buf, size_t len);
++ssize_t   w32_file_write(HANDLE h, const void *buf, size_t len);
++int64_t   w32_file_seek(HANDLE h, int64_t off, int whence);
++uint64_t  w32_file_size(HANDLE h);
++int       w32_file_stat(HANDLE h, struct stat *st);
++
+ /* ---- Events ----------------------------------------------------------- */
+ HANDLE CreateEventA(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCSTR name);
+ HANDLE CreateEventW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCWSTR name);
+@@ -168,6 +192,7 @@ DWORD  GetCurrentProcessId(void);
  BOOL   SetThreadPriority(HANDLE h, int priority);
  int    GetThreadPriority(HANDLE h);
  VOID   SwitchToThread(void);
@@ -8177,7 +9662,7 @@ index 22762ee..4c1a32c 100644
  DWORD  QueueUserAPC(PAPCFUNC func, HANDLE thread, ULONG_PTR data);
  
  /* ---- Sleep ------------------------------------------------------------ */
-@@ -228,6 +229,7 @@ unsigned int _clearfp(void);   /* clear pending FPU exception flags */
+@@ -228,6 +253,7 @@ unsigned int _clearfp(void);   /* clear pending FPU exception flags */
  
  /* MSVC stack alloca alias. <alloca.h> provides the underlying function. */
  #include <alloca.h>
@@ -8185,7 +9670,7 @@ index 22762ee..4c1a32c 100644
  #define _alloca(n) alloca(n)
  
  /* ---- Win32 file API (POSIX-backed) ----------------------------------- */
-@@ -438,7 +440,7 @@ VOID RaiseException(DWORD code, DWORD flags, DWORD nargs, const ULONG_PTR *args)
+@@ -438,7 +464,7 @@ VOID RaiseException(DWORD code, DWORD flags, DWORD nargs, const ULONG_PTR *args)
   * 
   * Note: GCC needs correct struct. This is from nxdk
   * */
@@ -8385,10 +9870,18 @@ index 94ff7b2..2a01b28 100644
  /* Report counts at exit, so a run says whether the driver ever looked. */
  void xbox_OhciReport(void);
 diff --git a/src/usb/usb_gamepad.c b/src/usb/usb_gamepad.c
-index bd00f3f..96dbd65 100644
+index bd00f3f..2c1683f 100644
 --- a/src/usb/usb_gamepad.c
 +++ b/src/usb/usb_gamepad.c
-@@ -442,6 +442,55 @@ static void pad_script_compact(unsigned long t)
+@@ -12,6 +12,7 @@
+  * pad plugged into the PC drives this one.
+  */
+ #include "usb_gamepad.h"
++#include "../video/ui_overlay.h"
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -442,6 +443,55 @@ static void pad_script_compact(unsigned long t)
      s_script_len = n;
  }
  
@@ -8444,7 +9937,7 @@ index bd00f3f..96dbd65 100644
  /* Read whatever has been appended to RECOMP_PAD_LIVE since last time, and
   * schedule each complete line at t. Polled at most every 50 ms. */
  static void pad_live_poll(unsigned long t)
-@@ -452,10 +501,14 @@ static void pad_live_poll(unsigned long t)
+@@ -452,10 +502,14 @@ static void pad_live_poll(unsigned long t)
      static unsigned long last_poll;
      static char pending[512];
      static size_t npending;
@@ -8460,7 +9953,7 @@ index bd00f3f..96dbd65 100644
      if (!checked) {
          checked = 1;
          path = getenv("RECOMP_PAD_LIVE");
-@@ -478,26 +531,8 @@ static void pad_live_poll(unsigned long t)
+@@ -478,26 +532,8 @@ static void pad_live_poll(unsigned long t)
          consumed++;
          if (c == '\n' || c == '\r') {
              if (npending) {
@@ -8488,7 +9981,7 @@ index bd00f3f..96dbd65 100644
                  npending = 0;
              }
          } else if (npending < sizeof pending - 1) {
-@@ -556,6 +591,17 @@ static void pad_script_apply(int pad, uint8_t *out)
+@@ -556,6 +592,17 @@ static void pad_script_apply(int pad, uint8_t *out)
      }
  }
  
@@ -8506,7 +9999,19 @@ index bd00f3f..96dbd65 100644
  int usb_gamepad_report(int pad, uint8_t *out, int max)
  {
      XBOX_INPUT_STATE state;
-@@ -611,6 +657,7 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
+@@ -569,6 +616,11 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
+     out[0] = 0;
+     out[1] = 20;
+ 
++    /* A port screen (its options menu) owns the pads while it is up: the
++     * title keeps polling the device and must see an untouched controller. */
++    if (xbox_UiBlocksInput())
++        return 20;
++
+     /* A disconnected host pad is not an error here: the device is present on
+      * the bus either way, it just reports nothing pressed. */
+     /* RECOMP_INPUT_DIAG: the whole chain on one line, once a second.
+@@ -611,6 +663,7 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
      if (xbox_InputGetState((DWORD)pad, &state) != 0) {
          out[2] = synth;
          pad_script_apply(pad, out);
@@ -8514,7 +10019,7 @@ index bd00f3f..96dbd65 100644
          return 20;
      }
  
-@@ -628,5 +675,6 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
+@@ -628,5 +681,6 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
      out[18] = (uint8_t)(g->sThumbRY & 0xFF);
      out[19] = (uint8_t)((g->sThumbRY >> 8) & 0xFF);
      pad_script_apply(pad, out);
@@ -8549,15 +10054,16 @@ index 18291d7..bb0a910 100644
   * XInput pad n and by pad-script steps prefixed "p<n+1>-". */
  #define USB_GAMEPAD_MAX 4
 diff --git a/src/video/CMakeLists.txt b/src/video/CMakeLists.txt
-index 2189a3b..edf96c4 100644
+index 2189a3b..b0f20b5 100644
 --- a/src/video/CMakeLists.txt
 +++ b/src/video/CMakeLists.txt
-@@ -3,12 +3,32 @@ add_library(xbox_video STATIC
+@@ -3,12 +3,33 @@ add_library(xbox_video STATIC
      video_player.c
      video_pump.c
      fb_present.c
 +    fb_gamma.c
 +    gpu_present.c
++    ui_overlay.c
  )
 +if(EMSCRIPTEN)
 +    target_sources(xbox_video PRIVATE fb_present_web.c)
@@ -8669,10 +10175,10 @@ index 0000000..165eab0
 +    return s_lut_serial;
 +}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 08bae4b..4283c16 100644
+index 08bae4b..9ee2f99 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -15,12 +15,15 @@
+@@ -15,12 +15,16 @@
   * Off unless RECOMP_FB_WINDOW is set.
   */
  #include <stdint.h>
@@ -8685,10 +10191,11 @@ index 08bae4b..4283c16 100644
  #include <stdlib.h>
  #include <string.h>
 +#include "gpu_present.h"
++#include "ui_overlay.h"
  
  extern ptrdiff_t xbox_GetMemoryOffset(void);
  
-@@ -42,6 +45,20 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+@@ -42,6 +46,20 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  
@@ -8709,7 +10216,7 @@ index 08bae4b..4283c16 100644
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
  {
      /* RECOMP_FB_VA pins the window to one guest address instead of following
-@@ -98,6 +115,62 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -98,6 +116,62 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
      InterlockedExchange(&s_present_idx, next);
  }
  
@@ -8772,7 +10279,7 @@ index 08bae4b..4283c16 100644
  /* Which keys are down, for the pad stand-in in src/input.
   *
   * GetAsyncKeyState looked like the cheaper way to ask and does not work
-@@ -110,6 +183,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -110,6 +184,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
   * thread and read only by the USB thread, one byte at a time, and a press
   * seen a frame late is indistinguishable from one made a frame later. */
  static volatile unsigned char s_key_down[256];
@@ -8780,7 +10287,7 @@ index 08bae4b..4283c16 100644
  
  /* Title bar, the way ps3recomp's window shows it. Written by the flip,
   * read once a second by the window thread; a torn read shows one stale
-@@ -127,10 +201,91 @@ void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
+@@ -127,31 +202,301 @@ void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
          s_title[i] = 0;
  }
  
@@ -8872,7 +10379,11 @@ index 08bae4b..4283c16 100644
  }
  
  int xbox_FramebufferKeyDown(int vk)
-@@ -140,18 +295,194 @@ int xbox_FramebufferKeyDown(int vk)
+ {
+     if ((unsigned)vk > 255)
+         return 0;
++    if (xbox_UiBlocksInput())
++        return 0;                       /* a port screen is up: keys are its own */
      return s_key_down[vk] != 0;
  }
  
@@ -8948,6 +10459,12 @@ index 08bae4b..4283c16 100644
 +        s_overlay = e && *e && *e != '0';
 +    }
 +    return s_overlay > 0;
++}
++
++/* A port's own options screen turns it on and off (ui_overlay.h). */
++void xbox_FramebufferSetFpsOverlay(int on)
++{
++    InterlockedExchange(&s_overlay, on ? 1 : 0);
 +}
 +
 +/* 5x7 glyphs, one byte per row, bit 4 = leftmost column. */
@@ -9027,6 +10544,11 @@ index 08bae4b..4283c16 100644
 +
  static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
  {
++    /* A port screen gets the keys first, and a key it takes is not remembered
++     * for the pad stand-in either -- otherwise navigating the menu also moves
++     * the title's own menu. */
++    if ((m == WM_KEYDOWN || m == WM_KEYUP) && xbox_UiKey((int)w, m == WM_KEYDOWN))
++        return 0;
 +    if ((m == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29)) && !(l & (1 << 30)))
 +        || (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30)))) {
 +        fb_toggle_fullscreen(h);
@@ -9068,7 +10590,7 @@ index 08bae4b..4283c16 100644
          /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
           *
           * The obvious diagnostic -- sampling which keys are held, once a
-@@ -217,32 +548,55 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+@@ -217,32 +562,55 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
   * A black window is ambiguous: it means either that the read path is wrong or
   * that the title really did render black. Dumping the same converted pixels
   * the window draws settles which, and does it without a screenshot. */
@@ -9132,7 +10654,7 @@ index 08bae4b..4283c16 100644
              line[x * 3 + 0] = (uint8_t)(src[x] & 0xFF);
              line[x * 3 + 1] = (uint8_t)((src[x] >> 8) & 0xFF);
              line[x * 3 + 2] = (uint8_t)((src[x] >> 16) & 0xFF);
-@@ -250,12 +604,155 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -250,12 +618,155 @@ int xbox_FramebufferDumpBmp(const char *path)
          fwrite(line, 1, row, f);
      }
      free(line);
@@ -9290,7 +10812,7 @@ index 08bae4b..4283c16 100644
  static DWORD WINAPI fb_thread(LPVOID unused)
  {
      HWND hwnd;
-@@ -274,18 +771,56 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -274,18 +785,56 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
@@ -9354,7 +10876,7 @@ index 08bae4b..4283c16 100644
  
      memset(&bi, 0, sizeof(bi));
      bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
-@@ -299,6 +834,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -299,6 +848,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
  
      fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
              s_fb_width, s_fb_height);
@@ -9365,7 +10887,7 @@ index 08bae4b..4283c16 100644
  
      while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
          MSG msg;
-@@ -306,7 +845,42 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -306,7 +859,43 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              TranslateMessage(&msg);
              DispatchMessageA(&msg);
          }
@@ -9392,6 +10914,7 @@ index 08bae4b..4283c16 100644
 +                LONG k = s_hi_front;
 +                double tw0 = pres_now_ms(), tw1;
 +                fps_overlay_draw(s_hi[k], s_hi_w[k], s_hi_h[k]);
++                xbox_UiDraw(s_hi[k], s_hi_w[k], s_hi_h[k]);
 +                if (s_seq_want)
 +                    seq_frame(s_hi[k], s_hi_w[k], s_hi_h[k]);
 +                tw1 = pres_now_ms();
@@ -9409,7 +10932,7 @@ index 08bae4b..4283c16 100644
              /* A finished frame, published by the flip. Copied into s_rgb so
               * the dump path and GDI see one consistent image even if the
               * next flip lands mid-blit. */
-@@ -314,19 +888,28 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -314,19 +903,29 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              if (s_present[idx])
                  memcpy(s_rgb, s_present[idx],
                         (size_t)s_fb_width * s_fb_height * 4);
@@ -9419,6 +10942,7 @@ index 08bae4b..4283c16 100644
 +            xbox_FramebufferApplyGamma(s_rgb, (size_t)s_fb_width * s_fb_height);
 +            if (gpu_present_active()) {
 +                fps_overlay_draw(s_rgb, s_fb_width, s_fb_height);
++                xbox_UiDraw(s_rgb, s_fb_width, s_fb_height);
 +                if (!gpu_present_frame_size(s_rgb, s_fb_width, s_fb_height))  /* vsync-paced, unless occluded */
 +                    Sleep(16);
 +            }
@@ -9444,7 +10968,7 @@ index 08bae4b..4283c16 100644
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -357,6 +940,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -357,6 +956,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              if (now - t0 >= 1000) {
                  LONG f = s_flips;
                  wchar_t tb[128];
@@ -9455,7 +10979,7 @@ index 08bae4b..4283c16 100644
                  _snwprintf(tb, 127, L"%ls | FPS: %.1f | draws: %ld", s_title,
                             t0 ? (f - f0) * 1000.0 / (now - t0) : 0.0,
                             (long)s_frame_draws);
-@@ -365,9 +952,12 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -365,9 +968,12 @@ static DWORD WINAPI fb_thread(LPVOID unused)
                  t0 = now; f0 = f;
              }
          }
@@ -9469,7 +10993,7 @@ index 08bae4b..4283c16 100644
      ReleaseDC(hwnd, hdc);
      DestroyWindow(hwnd);
      free(s_rgb);
-@@ -390,11 +980,4 @@ void xbox_FramebufferWindowStart(void)
+@@ -390,11 +996,4 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  
@@ -9483,10 +11007,10 @@ index 08bae4b..4283c16 100644
  #endif
 diff --git a/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
 new file mode 100644
-index 0000000..da6124f
+index 0000000..743e958
 --- /dev/null
 +++ b/src/video/fb_present_sdl.c
-@@ -0,0 +1,549 @@
+@@ -0,0 +1,571 @@
 +/**
 + * POSIX counterpart of fb_present.c: show the guest framebuffer in an SDL2
 + * window. Same contract (RECOMP_FB_WINDOW, flip-time copy, BMP dump, snap
@@ -9497,6 +11021,7 @@ index 0000000..da6124f
 +#if !defined(_WIN32)
 +#define _GNU_SOURCE
 +#include <SDL2/SDL.h>
++#include "ui_overlay.h"
 +#if defined(__ANDROID__)
 +#include "touch_pad.h"
 +#endif
@@ -9523,6 +11048,9 @@ index 0000000..da6124f
 +
 +/* The window's client area in pixels (see fb_present.c). */
 +static volatile int s_client_w, s_client_h;
++
++/* No frame counter in this presenter; the port's setting is still accepted. */
++void xbox_FramebufferSetFpsOverlay(int on) { (void)on; }
 +
 +int xbox_FramebufferClientSize(int *w, int *h)
 +{
@@ -9890,10 +11418,24 @@ index 0000000..da6124f
 +            } else if (e.type == SDL_FINGERDOWN || e.type == SDL_FINGERMOTION ||
 +                       e.type == SDL_FINGERUP || e.type == SDL_MOUSEBUTTONDOWN ||
 +                       e.type == SDL_MOUSEBUTTONUP || e.type == SDL_MOUSEMOTION) {
++                /* A port screen takes fingers in window pixels; the pad it
++                 * hides underneath would read the same tap in its own space. */
++                if (e.type == SDL_FINGERDOWN || e.type == SDL_FINGERMOTION ||
++                    e.type == SDL_FINGERUP) {
++                    int ww = 0, wh = 0;
++                    SDL_GetWindowSize(win, &ww, &wh);
++                    if (ww > 0 && wh > 0
++                        && xbox_UiTouch(e.tfinger.x * (float)ww, e.tfinger.y * (float)wh,
++                                        e.type == SDL_FINGERDOWN ? 0
++                                        : e.type == SDL_FINGERUP ? 2 : 1))
++                        continue;
++                }
 +                touch_pad_event(&e, ren);
 +#endif
 +            } else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
 +                int vk = sdl_to_vk(e.key.keysym.sym);
++                if (vk && xbox_UiKey(vk, e.type == SDL_KEYDOWN))
++                    continue;
 +                /* RECOMP_KEY_TRACE: each key as it arrives, as in fb_present.c,
 +                 * with SDL's name for it -- tells "never reached the window"
 +                 * (a desktop shortcut or media key) from "arrived unmapped". */
@@ -9943,12 +11485,14 @@ index 0000000..da6124f
 +            if (hi_tex && hi_rgb) {
 +                if (fresh) {
 +                    xbox_FramebufferApplyGamma(hi_rgb, (size_t)hi_w * hi_h);
++                    xbox_UiDraw(hi_rgb, hi_w, hi_h);
 +                    SDL_UpdateTexture(hi_tex, NULL, hi_rgb, (int)(hi_w * 4));
 +                }
 +                SDL_RenderClear(ren);
 +                SDL_RenderCopy(ren, hi_tex, NULL, NULL);
 +#if defined(__ANDROID__)
-+                touch_pad_render(ren);
++                if (!xbox_UiBlocksInput())
++                    touch_pad_render(ren);
 +#endif
 +                SDL_RenderPresent(ren);
 +                snap_trigger_poll(hi_rgb, hi_w, hi_h);
@@ -9975,11 +11519,13 @@ index 0000000..da6124f
 +                               s_fb_pitch / s_fb_width);
 +        }
 +        xbox_FramebufferApplyGamma(s_rgb, (size_t)s_fb_width * s_fb_height);
++        xbox_UiDraw(s_rgb, s_fb_width, s_fb_height);
 +        SDL_UpdateTexture(tex, NULL, s_rgb, (int)(s_fb_width * 4));
 +        SDL_RenderClear(ren);
 +        SDL_RenderCopy(ren, tex, NULL, NULL);
 +#if defined(__ANDROID__)
-+        touch_pad_render(ren);
++        if (!xbox_UiBlocksInput())
++            touch_pad_render(ren);
 +#endif
 +        SDL_RenderPresent(ren);
 +        snap_trigger_poll(NULL, 0, 0);
@@ -11679,6 +13225,89 @@ index 0000000..9eae157
 +int touch_pad_enabled(void);
 +
 +#endif /* XBOX_TOUCH_PAD_H */
+diff --git a/src/video/ui_overlay.c b/src/video/ui_overlay.c
+new file mode 100644
+index 0000000..f91430f
+--- /dev/null
++++ b/src/video/ui_overlay.c
+@@ -0,0 +1,29 @@
++/* ui_overlay.h: the port's hooks, defined once for whichever presenter is
++ * built (fb_present.c on Windows, fb_present_sdl.c elsewhere). */
++#include "ui_overlay.h"
++
++void (*volatile xbox_ui_draw)(uint32_t *px, uint32_t w, uint32_t h);
++int  (*volatile xbox_ui_key)(int vk, int down);
++int  (*volatile xbox_ui_touch)(float x, float y, int phase);
++int  (*volatile xbox_ui_blocks_input)(void);
++
++void xbox_UiDraw(uint32_t *px, uint32_t w, uint32_t h)
++{
++    if (xbox_ui_draw && px && w && h)
++        xbox_ui_draw(px, w, h);
++}
++
++int xbox_UiKey(int vk, int down)
++{
++    return xbox_ui_key ? xbox_ui_key(vk, down) : 0;
++}
++
++int xbox_UiTouch(float x, float y, int phase)
++{
++    return xbox_ui_touch ? xbox_ui_touch(x, y, phase) : 0;
++}
++
++int xbox_UiBlocksInput(void)
++{
++    return xbox_ui_blocks_input ? xbox_ui_blocks_input() : 0;
++}
+diff --git a/src/video/ui_overlay.h b/src/video/ui_overlay.h
+new file mode 100644
+index 0000000..f1de383
+--- /dev/null
++++ b/src/video/ui_overlay.h
+@@ -0,0 +1,42 @@
++/*
++ * ui_overlay.h -- a port's own screens, over the presented image.
++ *
++ * The presenters own the window; a port that wants an options screen in the
++ * game installs these hooks and draws into the frame it is handed. Called on
++ * the thread that owns the window, once per presented frame (Windows: the
++ * GDI/D3D11 window loop; SDL: the presenter loop).
++ *
++ * All of them are optional: NULL means "the port has no screens".
++ */
++#ifndef XBOX_UI_OVERLAY_H
++#define XBOX_UI_OVERLAY_H
++
++#include <stdint.h>
++
++/* Draw over a finished frame, in place. `px` is 0x00RRGGBB, `w`x`h` the
++ * frame's own pixels (not window pixels): that is what makes an overlay look
++ * identical at every internal resolution. */
++extern void (*volatile xbox_ui_draw)(uint32_t *px, uint32_t w, uint32_t h);
++
++/* A window key, VK code (both presenters map to VK). Returns 1 when the port
++ * took it -- the key then neither reaches the title nor moves the pad. */
++extern int (*volatile xbox_ui_key)(int vk, int down);
++
++/* A touch in window pixels. phase: 0 down, 1 move, 2 up. Returns 1 when the
++ * port took it. */
++extern int (*volatile xbox_ui_touch)(float x, float y, int phase);
++
++/* 1 while the port's screen is up and the title must not see input. */
++extern int (*volatile xbox_ui_blocks_input)(void);
++
++/* The presenter's own frame counter (F3 on a desktop window), for a port that
++ * offers it as a setting. A no-op where the presenter has none. */
++void xbox_FramebufferSetFpsOverlay(int on);
++
++/* The above with the NULL checks done (xbox_ui_*.c). */
++void xbox_UiDraw(uint32_t *px, uint32_t w, uint32_t h);
++int  xbox_UiKey(int vk, int down);
++int  xbox_UiTouch(float x, float y, int phase);
++int  xbox_UiBlocksInput(void);
++
++#endif /* XBOX_UI_OVERLAY_H */
 diff --git a/src/video/video_player.h b/src/video/video_player.h
 index c844aef..cf11ad1 100644
 --- a/src/video/video_player.h
@@ -11826,6 +13455,341 @@ index 8e9325e..e2089b0 100644
  /* ================================================================
   * Register name aliases for generated code
   *
+diff --git a/tests/iso_image/README.md b/tests/iso_image/README.md
+new file mode 100644
+index 0000000..b389a55
+--- /dev/null
++++ b/tests/iso_image/README.md
+@@ -0,0 +1,33 @@
++# Disc-image overlay: byte-for-byte check against the extracted tree
++
++Exercises `src/kernel/kernel_iso.c` — the layer a bundled APK uses to read its
++game files out of the disc image it carries — without a device.
++
++It mounts the real image **in two pieces split at 1 GiB**, so every read that
++crosses the seam exercises the stitching, then walks the image and compares
++each file with its counterpart in the tree the image was extracted to. It also
++checks that a lookup ignores case, that a relative path (`game/default.xbe`,
++which is how the ports probe their own files) resolves against the working
++directory, and that a path outside the mount point does not resolve.
++
++```
++tests/iso_image/run.bat "C:\path\SSX 3 (Europe).xiso.iso" C:\path\to\game
++```
++
++Needs MSVC (this is where the rip is; the same file is compiled by the Android
++build) and writes its scratch directory under `%TEMP%`. An image path with
++spaces and parentheses trips cmd's own argument parsing, so quote it or, from a
++shell that quotes properly (`bash`, PowerShell), call the built exe directly:
++
++```
++iso_test <scratch>/mount <tree> /full "<image>"
++``` Expected tail:
++
++```
++[ISO] 139 file(s) mounted from 2 part(s), 2180 MB, at .../mount
++121 file(s), 2285258804 byte(s) compared, 0 bad
++```
++
++`121` is the 120 files under `data/` plus `default.xbe`; the byte count is the
++tree's total, so a short read anywhere shows up as a mismatch rather than as a
++plausible-looking success.
+diff --git a/tests/iso_image/run.bat b/tests/iso_image/run.bat
+new file mode 100644
+index 0000000..42df01e
+--- /dev/null
++++ b/tests/iso_image/run.bat
+@@ -0,0 +1,26 @@
++@echo off
++rem Builds and runs the disc-image overlay check. See README.md.
++rem   run.bat <disc image> <extracted tree>
++setlocal
++if "%~1"=="" goto usage
++if "%~2"=="" goto usage
++
++where cl >nul 2>&1
++if errorlevel 1 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
++
++set WORK=%TEMP%\iso_image_test
++set EXE=%WORK%\iso_test.exe
++if not exist "%WORK%" mkdir "%WORK%"
++if not exist "%WORK%\mount" mkdir "%WORK%\mount"
++
++cl /nologo /W3 /O2 /D_CRT_SECURE_NO_WARNINGS /Fe"%EXE%" ^
++   "%~dp0test_main.c" "%~dp0..\..\src\kernel\kernel_iso.c" || exit /b 1
++
++rem the image is the fourth argument: the test writes the mount description
++rem itself, so paths with spaces and parentheses never pass through cmd
++"%EXE%" "%WORK%\mount" "%~f2" /full "%~f1"
++exit /b %ERRORLEVEL%
++
++:usage
++echo usage: run.bat "<disc image>" "<extracted tree>"
++exit /b 2
+diff --git a/tests/iso_image/test_main.c b/tests/iso_image/test_main.c
+new file mode 100644
+index 0000000..dac3de1
+--- /dev/null
++++ b/tests/iso_image/test_main.c
+@@ -0,0 +1,258 @@
++/* Host test for the disc-image overlay (src/kernel/kernel_iso.c).
++ *
++ * Builds on Windows only because that is where the rip is; the parser and the
++ * piece stitching are the same code the Android build compiles. It mounts a
++ * real image split at a sector boundary (so reads cross the seam between
++ * pieces), then walks the image and compares every file byte for byte with
++ * the extracted tree it was made from.
++ *
++ *   iso_test <mount-dir> <tree> [/full] [image]
++ *
++ * <mount-dir> is a scratch directory this writes .disc.mount into. The image is
++ * the fourth argument when given (then it is remembered in
++ * <mount-dir>/image.txt), otherwise the first line of that file is used.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <io.h>
++#include <direct.h>
++#include <fcntl.h>
++#include <sys/stat.h>
++
++#include "../../src/kernel/kernel_iso.h"
++
++#define SEAM (1024ull * 1024ull * 1024ull)   /* 1 GiB, a multiple of 2048 */
++
++static char s_mount[512];
++static char s_tree[512];
++
++/* kernel_iso.c asks the path layer where the game directory is; for this test
++ * the mount point is that directory. */
++const char *xbox_game_dir(void);
++static long long s_files, s_bytes, s_bad;
++
++const char *xbox_game_dir(void)
++{
++    return s_mount;
++}
++static int s_full;
++
++static int slurp(const char *path, unsigned char **out, long long *len)
++{
++    FILE *f = fopen(path, "rb");
++    long long n;
++
++    if (!f)
++        return -1;
++    fseek(f, 0, SEEK_END);
++    n = _ftelli64(f);
++    fseek(f, 0, SEEK_SET);
++    *out = (unsigned char *)malloc((size_t)n ? (size_t)n : 1);
++    if (!*out || fread(*out, 1, (size_t)n, f) != (size_t)n) {
++        fclose(f);
++        free(*out);
++        return -1;
++    }
++    fclose(f);
++    *len = n;
++    return 0;
++}
++
++/* Compare one image file with its extracted counterpart by streaming both. */
++static void check_file(const char *rel)
++{
++    char host[1024], real[1024];
++    int h;
++    unsigned char *want;
++    long long want_len, off = 0;
++    static unsigned char buf[1 << 20];   /* not on the stack: 1 MB overflows it */
++
++    snprintf(host, sizeof host, "%s/%s", s_mount, rel);
++    h = xbox_iso_open(host);
++    if (h < 0) {
++        printf("MISSING in image: %s\n", rel);
++        s_bad++;
++        return;
++    }
++    snprintf(real, sizeof real, "%s/%s", s_tree, rel);
++    if (slurp(real, &want, &want_len) != 0) {
++        printf("no extracted file for %s\n", rel);
++        s_bad++;
++        xbox_iso_close(h);
++        return;
++    }
++    if ((long long)xbox_iso_handle_size(h) != want_len) {
++        printf("SIZE %s: image %llu, tree %lld\n", rel,
++               (unsigned long long)xbox_iso_handle_size(h), want_len);
++        s_bad++;
++        xbox_iso_close(h);
++        free(want);
++        return;
++    }
++    while (off < want_len) {
++        size_t want_n = want_len - off < (long long)sizeof buf ? (size_t)(want_len - off)
++                                                               : sizeof buf;
++        int64_t got = xbox_iso_pread(h, buf, want_n, (uint64_t)off);
++        if (got != (int64_t)want_n || memcmp(buf, want + off, want_n) != 0) {
++            printf("BYTES %s at %lld\n", rel, off);
++            s_bad++;
++            break;
++        }
++        off += (long long)want_n;
++    }
++    xbox_iso_close(h);
++    free(want);
++    s_files++;
++    s_bytes += want_len;
++}
++
++typedef struct {
++    char  dir[1024];
++    int   depth;
++} walk_state;
++
++static void walk(const char *rel);
++
++static void ent_cb(void *user, const char *name, uint64_t size, int isdir)
++{
++    walk_state *st = (walk_state *)user;
++    char rel[1024];
++
++    if (*st->dir)
++        snprintf(rel, sizeof rel, "%s/%s", st->dir, name);
++    else
++        snprintf(rel, sizeof rel, "%s", name);
++    if (isdir)
++        walk(rel);
++    else
++        check_file(rel);
++    (void)size;
++}
++
++static void walk(const char *rel)
++{
++    walk_state st;
++    char host[1024];
++
++    if (strlen(rel) >= sizeof st.dir)
++        return;
++    snprintf(st.dir, sizeof st.dir, "%s", rel);
++    st.depth = 0;
++    snprintf(host, sizeof host, "%s/%s", s_mount, rel);
++    if (xbox_iso_list(host, ent_cb, &st) < 0)
++        printf("not a directory in the image: %s\n", rel);
++}
++
++int main(int argc, char **argv)
++{
++    char path[1024], line[1024];
++    FILE *f;
++    int fd, fd2;
++    long long image_size;
++
++    if (argc < 3) {
++        printf("usage: iso_test <mount-dir> <tree> [/full]\n");
++        return 2;
++    }
++    snprintf(s_mount, sizeof s_mount, "%s", argv[1]);
++    snprintf(s_tree, sizeof s_tree, "%s", argv[2]);
++    s_full = argc > 3 && !strcmp(argv[3], "/full");
++
++    snprintf(path, sizeof path, "%s/image.txt", s_mount);
++    if (argc > 4 && argv[4][0]) {
++        f = fopen(path, "w");
++        if (!f) {
++            printf("cannot write %s\n", path);
++            return 2;
++        }
++        fprintf(f, "%s\n", argv[4]);
++        fclose(f);
++        snprintf(line, sizeof line, "%s", argv[4]);
++    } else {
++        f = fopen(path, "r");
++        if (!f) {
++            printf("cannot read %s (pass the image as the fourth argument)\n", path);
++            return 2;
++        }
++        if (!fgets(line, sizeof line, f)) {
++            fclose(f);
++            return 2;
++        }
++        fclose(f);
++        line[strcspn(line, "\r\n")] = '\0';
++    }
++
++    fd = _open(line, _O_RDONLY | _O_BINARY);
++    if (fd < 0) {
++        printf("cannot open the image: %s\n", line);
++        return 2;
++    }
++    image_size = _lseeki64(fd, 0, SEEK_END);
++    fd2 = _open(line, _O_RDONLY | _O_BINARY);
++    if (fd2 < 0 || image_size <= (long long)SEAM) {
++        printf("image too small to split\n");
++        return 2;
++    }
++
++    /* Two pieces of the same file: everything below the seam comes from one
++     * descriptor, the rest from the other, so every read that crosses 1 GiB
++     * exercises the stitching. */
++    snprintf(path, sizeof path, "%s/.disc.mount", s_mount);
++    f = fopen(path, "w");
++    if (!f) {
++        printf("cannot write %s\n", path);
++        return 2;
++    }
++    fprintf(f, "# written by tests/iso_image\n");
++    fprintf(f, "PREFIX=%s\n", s_mount);
++    fprintf(f, "PART=%d 0 %llu\n", fd, (unsigned long long)SEAM);
++    fprintf(f, "PART=%d %llu %llu\n", fd2, (unsigned long long)SEAM,
++            (unsigned long long)(image_size - (long long)SEAM));
++    fclose(f);
++
++    if (!xbox_iso_ready(s_mount)) {
++        printf("mount failed\n");
++        return 1;
++    }
++
++    /* A port probes its own files relatively ("game/default.xbe"); the lookup
++     * has to resolve that against the working directory, not the mount point. */
++    {
++        char parent[1024], leaf[512], rel[1200];
++        const char *slash;
++        snprintf(parent, sizeof parent, "%s", s_mount);
++        slash = strrchr(parent, '/');
++        if (slash) {
++            snprintf(leaf, sizeof leaf, "%s", slash + 1);
++            *((char *)slash) = '\0';
++            _chdir(parent);
++            snprintf(rel, sizeof rel, "%s/default.xbe", leaf);
++            if (xbox_iso_find(rel) < 0)
++                printf("FAIL: a relative path did not resolve\n");
++            if (!xbox_game_file_exists(rel))
++                printf("FAIL: the image's file was not reported as existing\n");
++            _chdir(s_mount);
++        }
++    }
++
++    /* Case does not survive the guest's FATX habits, so lookup ignores it. */
++    {
++        char probe[1024];
++        snprintf(probe, sizeof probe, "%s/DEFAULT.XBE", s_mount);
++        if (xbox_iso_find(probe) < 0)
++            printf("FAIL: lookup is case-sensitive\n");
++        snprintf(probe, sizeof probe, "%s/../outside", s_mount);
++        if (xbox_iso_find(probe) >= 0)
++            printf("FAIL: a path outside the mount point resolved\n");
++    }
++
++    if (s_full)
++        walk("");
++    else
++        check_file("default.xbe");
++
++    printf("%lld file(s), %lld byte(s) compared, %lld bad\n",
++           s_files, s_bytes, s_bad);
++    return s_bad ? 1 : 0;
++}
 diff --git a/tools/recomp/translator.py b/tools/recomp/translator.py
 index 3cd9250..0e9c350 100644
 --- a/tools/recomp/translator.py

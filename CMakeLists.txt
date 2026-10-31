@@ -75,6 +75,8 @@ set(GAME_SOURCES
     src/autonav.c
     src/mmio_posix.c
     src/web_platform.c
+    src/settings.c
+    src/in_game_menu.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
     # src/custom_renderer.c

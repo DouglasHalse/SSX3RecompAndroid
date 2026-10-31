@@ -10,6 +10,7 @@
  * `extern uint32_t g_eax` names the TLS template, not the running thread's copy.
  */
 #include "log.h"
+#include "settings.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -249,12 +250,14 @@ static unsigned s_dd_full_frames;  /* frames with a list full (log) */
 
 static void dd_init(void)
 {
-    if (s_dd_mul < 0.0f) {
+    static unsigned gen;
+    if (s_dd_mul < 0.0f || gen != ssx3_SettingsGeneration()) {
         const char *e = getenv("RECOMP_DRAW_DIST");
         s_dd_mul = e && *e ? (float)atof(e) : 1.5f;
         if (s_dd_mul < 0.1f)
             s_dd_mul = 1.0f;
         s_dd_eff = s_dd_mul;
+        gen = ssx3_SettingsGeneration();
     }
 }
 

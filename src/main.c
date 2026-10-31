@@ -35,6 +35,8 @@
 #endif
 #include "log.h"
 #include "journal.h"
+#include "settings.h"
+#include "in_game_menu.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -892,6 +894,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Unbuffered output for immediate visibility during debugging */
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+
+    /* The options screen's file first: everything below reads the variables
+     * it sets, and the screen edits them while the game runs. */
+    ssx3_SettingsLoad();
+    ssx3_InGameMenuInstall();
 
     /* Runtime options SSX 3 needs; set before anything reads them, and only
      * when not already set, so a run can still override them.
