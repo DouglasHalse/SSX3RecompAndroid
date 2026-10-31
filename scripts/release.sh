@@ -54,7 +54,11 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && {
 }
 # Bump the version in one place and the release notes can quote it.
 COMMIT=$(git rev-parse --short HEAD)
-TOOLKIT_COMMIT=$( (cd "$ROOT/../xboxrecomp" && git rev-parse --short HEAD) 2>/dev/null || echo unknown )
+# The toolkit the build compiles is the one the build cache points at: ../xboxrecomp
+# can be a different checkout, and then the stamp names code this APK does not carry.
+TOOLKIT_DIR=${TOOLKIT_DIR:-$(sed -n 's/^XBOXRECOMP_DIR:[A-Z]*=//p' build-android/CMakeCache.txt 2>/dev/null | head -1)}
+TOOLKIT_DIR=${TOOLKIT_DIR:-$ROOT/../xboxrecomp}
+TOOLKIT_COMMIT=$( (cd "$TOOLKIT_DIR" && git rev-parse --short HEAD) 2>/dev/null || echo unknown )
 VERSION_CODE=$(git rev-list --count HEAD)
 
 # The changelog reads from the previous release: this repo since its tag, the
