@@ -136,12 +136,22 @@ static void load_env_file(const char *root)
         fprintf(stderr, "[ANDROID] %d setting(s) from %s\n", n, path);
 }
 
+/* stdout/stderr go through a pipe that a thread copies into logcat, so a
+ * process that exits immediately can lose the very lines that explain why it
+ * exited. Give the reader a moment to drain. */
+static void log_drain(void)
+{
+    fflush(NULL);
+    usleep(200 * 1000);
+}
+
 static void *game_thread(void *arg)
 {
     (void)arg;
     int rc = ssx3_main(s_argc, s_argv);
     fprintf(stderr, "[ANDROID] game returned %d\n", rc);
     fflush(NULL);
+    usleep(200 * 1000);
     /* The presenter loop owns the SDL thread; stop it once the guest is done. */
     _exit(rc);
     return NULL;

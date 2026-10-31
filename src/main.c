@@ -851,10 +851,10 @@ static int find_game_dir(char *tried, size_t tried_size)
 #endif
     tried[0] = 0;
     for (i = 0; i < n; i++) {
-        FILE *f;
         snprintf(s_game_xbe, sizeof s_game_xbe, "%s/default.xbe", cand[i]);
-        if ((f = fopen(s_game_xbe, "rb")) != NULL) {
-            fclose(f);
+        /* Not "is it on disk": a bundled build carries the disc image inside
+         * the APK and the file layer serves default.xbe from there. */
+        if (xbox_game_file_exists(s_game_xbe)) {
             snprintf(s_game_dir, sizeof s_game_dir, "%s", cand[i]);
             return 1;
         }
@@ -1333,8 +1333,17 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
 {
     FILE *f = fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "Cannot open XBE: %s\n", path);
-        return FALSE;
+        /* A bundled build has no default.xbe on the filesystem: it lives in
+         * the disc image the file layer carries. */
+        void *blob = NULL;
+        size_t blob_size = 0;
+        if (!xbox_read_game_file(path, &blob, &blob_size)) {
+            fprintf(stderr, "Cannot open XBE: %s\n", path);
+            return FALSE;
+        }
+        *out_data = blob;
+        *out_size = blob_size;
+        return TRUE;
     }
 
     fseek(f, 0, SEEK_END);
