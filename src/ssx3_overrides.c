@@ -174,11 +174,16 @@ int ssx3_InGame(void)
     return cur >= 0x10000u && MEM32(cur) == 0x00299D7Cu;
 }
 
+static int ssx3_FullScreenPanelUp(void);
+
+/* ... and not while an MCOMM station prompt fills the screen: those panels
+ * are 4:3 art like the menus (laid out for widescreen their background
+ * stretched to the edges, white and grey, under a frame in the middle). */
 int ssx3_WidescreenNow(void)
 {
     if (ssx3_Aspect() <= 4.0f / 3.0f + 0.01f)
         return 0;
-    return ssx3_InGame();
+    return ssx3_InGame() && !ssx3_FullScreenPanelUp();
 }
 
 /*
@@ -256,6 +261,27 @@ static void dd_init(void)
             s_dd_mul = 1.0f;
         s_dd_eff = s_dd_mul;
     }
+}
+
+void ssx3_DrawDist(float *setting, float *in_use)
+{
+    dd_init();
+    *setting = s_dd_mul;
+    *in_use = s_dd_eff;
+}
+
+/* F5 (src/live.c): the draw distance setting, Normal 1x -> Far 1.5x ->
+ * Maximum 2x -> Normal; the adaptive view starts again from the original. */
+float ssx3_LiveDrawDistNext(void)
+{
+    static const float steps[3] = {1.0f, 1.5f, 2.0f};
+    int i;
+    dd_init();
+    for (i = 0; i < 3 && steps[i] <= s_dd_mul + 0.01f; i++)
+        ;
+    s_dd_mul = i < 3 ? steps[i] : steps[0];
+    s_dd_eff = s_dd_mul < 1.0f ? s_dd_mul : 1.0f;
+    return s_dd_mul;
 }
 
 void sub_001EAB40(void)
@@ -1122,6 +1148,15 @@ int ssx3_InGameMenuUp(void)
     return scr && ssx3_InGame() && MEM32(scr) == s_ingame_menu_vt && ssx3_ScreenShown(scr);
 }
 
+/* The in-game screens that cover the whole screen with 4:3 art: the MCOMM
+ * station prompts, lodge (opened as in-game screen 0x1F) and transport
+ * (0x21). Shown pillarboxed, like the menus (ssx3_WidescreenNow). */
+static int ssx3_FullScreenPanelUp(void)
+{
+    uint32_t vt = s_ingame_menu_vt;
+    return (vt == 0x00298650u || vt == 0x00298788u) && ssx3_InGameMenuUp();
+}
+
 /* Forget the remembered menu once it has closed (or is no longer that
  * screen): the briefing panel closed at the race start stayed remembered
  * for the whole race. */
@@ -1166,6 +1201,7 @@ static const char *screen_name(uint32_t vt, uint32_t id, int in_menus)
     case 0x002981D8u: return "pause menu";
     case 0x00297B60u: return "quit dialog";
     case 0x00298650u: return "lodge / station prompt";
+    case 0x00298788u: return "transport prompt";
     case 0x002938C0u: return "lodge";
     case 0x002984B0u: return "run result";
     case 0x00298378u: return "event results";

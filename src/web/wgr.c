@@ -253,6 +253,18 @@ void vkr_destroy(VkrContext *c)
 
 uint32_t vkr_tex_generation(VkrContext *c) { return c->tex_gen; }
 
+/* The live HD-texture switch empties the cache; the web build has no HD
+ * textures, so there is nothing to make again. */
+void vkr_tex_purge(VkrContext *c) { (void)c; }
+
+void vkr_info(VkrContext *c, uint32_t *w, uint32_t *h, uint32_t *msaa, uint64_t *tex_bytes)
+{
+    *w = c->sw;
+    *h = c->sh;
+    *msaa = 1;
+    *tex_bytes = c->tex_bytes;
+}
+
 /* ---- target ----------------------------------------------------------- */
 
 static void wait_all_free(VkrContext *c)

@@ -1115,7 +1115,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 /* the last 20 sessions and 10 crash dumps (with this one) */
                 logs_prune("ssx3_*_stderr.txt", 19);
                 logs_prune("crash_*.dmp", 9);
-                logs_prune("mark_*.bmp", 30);
+                logs_prune("mark_*.png", 30);
+                logs_prune("mark_*.bmp", 30);  /* marks from before v0.2.6 */
                 GetLocalTime(&st);
                 snprintf(logp + strlen(logp), sizeof logp - strlen(logp),
                          "\\ssx3_%04u%02u%02u-%02u%02u%02u_stderr.txt", st.wYear, st.wMonth,

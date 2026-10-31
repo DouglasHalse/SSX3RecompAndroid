@@ -9,7 +9,8 @@
  *
  * Plain Win32 (no runtime to install). Controllers are listed from XInput,
  * refreshed every second; player N is XInput slot N-1, which is how the
- * game assigns them.
+ * game assigns them. With "Check for updates" on, one request at start asks
+ * GitHub for the latest release and says when it is newer than this one.
  */
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -20,6 +21,7 @@
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <xinput.h>
+#include <winhttp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,16 +29,20 @@
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' " \
                         "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
+#include "build_info.h"           /* SSX3_BUILD_COMMIT: v0.2.4, or a commit */
+
 #define GAME_EXE   "ssx3_recomp.exe"
 #define TITLE_ID   0x4541003Cu      /* SSX 3, PAL: what this build was made from */
+#define RELEASES   "https://github.com/koenhendriks/SSX3-recomp/releases/latest"
+#define WM_UPDATE  (WM_APP + 1)      /* the update check's answer (lParam: malloc'd tag) */
 
 enum {
     ID_PATH = 100, ID_BROWSE, ID_STATUS,
     ID_RES, ID_ASPECT, ID_MSAA, ID_ANISO, ID_DRAWDIST, ID_SHADOWS, ID_AUDIO, ID_HUDEDGES, ID_FULLSCREEN, ID_CRT,
     ID_MBLUR, ID_CAM, ID_FPS, ID_HDTEX,
-    ID_SKIPINTRO, ID_FASTBOOT, ID_DEBUGMENU, ID_MONEY, ID_LOGLEVEL,
+    ID_SKIPINTRO, ID_FASTBOOT, ID_DEBUGMENU, ID_MONEY, ID_UPDATES, ID_LOGLEVEL,
     ID_PAD0, ID_PAD1, ID_PAD2, ID_PAD3, ID_KEYS,
-    ID_LOGS, ID_PLAY,
+    ID_LOGS, ID_RESET, ID_PLAY, ID_UPDATE,
     ID_TIMER = 1
 };
 
@@ -270,21 +276,41 @@ static void update_pads(void)
 
 /* ---- settings ------------------------------------------------------------ */
 
-static int ini_int(const char *key, int def)
+/* Every setting with its launcher.ini key and default: load, save and
+ * "Reset to defaults" all go through this table. */
+static const struct { int id, combo; const char *key; int def; } k_settings[] = {
+    {ID_RES, 1, "resolution", 0},       {ID_ASPECT, 1, "aspect", 0},
+    {ID_MSAA, 1, "msaa", 2},            {ID_ANISO, 1, "aniso", 3},
+    {ID_DRAWDIST, 1, "draw_distance", 1}, {ID_SHADOWS, 1, "shadows", 1},
+    {ID_AUDIO, 1, "audio_output", 0},   {ID_LOGLEVEL, 1, "log_level", 2},
+    {ID_FULLSCREEN, 0, "fullscreen", 0}, {ID_CRT, 0, "crt", 0},
+    {ID_MBLUR, 0, "motion_blur", 0},    {ID_CAM, 0, "modern_camera", 0},
+    {ID_FPS, 0, "fps_counter", 0},      {ID_HDTEX, 0, "hd_textures", 1},
+    {ID_HUDEDGES, 0, "hud_edges", 1},   {ID_SKIPINTRO, 0, "skip_intro", 1},
+    {ID_FASTBOOT, 0, "fast_boot", 1},   {ID_DEBUGMENU, 0, "debug_menu", 0},
+    {ID_MONEY, 0, "money_cheat", 0},    {ID_UPDATES, 0, "check_updates", 1},
+};
+#define NSETTINGS ((int)(sizeof k_settings / sizeof k_settings[0]))
+
+static void set_control(int i, int v)
 {
-    return (int)GetPrivateProfileIntA("launcher", key, def, s_ini);
+    if (k_settings[i].combo)
+        SendDlgItemMessageA(s_wnd, k_settings[i].id, CB_SETCURSEL, (WPARAM)v, 0);
+    else
+        CheckDlgButton(s_wnd, k_settings[i].id, v ? BST_CHECKED : BST_UNCHECKED);
 }
 
-static void ini_set_int(const char *key, int v)
+static int get_control(int i)
 {
-    char b[16];
-    snprintf(b, sizeof b, "%d", v);
-    WritePrivateProfileStringA("launcher", key, b, s_ini);
+    if (k_settings[i].combo)
+        return (int)SendDlgItemMessageA(s_wnd, k_settings[i].id, CB_GETCURSEL, 0, 0);
+    return IsDlgButtonChecked(s_wnd, k_settings[i].id) == BST_CHECKED;
 }
 
 static void load_settings(void)
 {
     char dir[MAX_PATH] = "";
+    int i;
     GetPrivateProfileStringA("launcher", "game_dir", "", dir, sizeof dir, s_ini);
     if (!*dir) {
         /* First run: a game\ folder next to the launcher, if there is one. */
@@ -294,52 +320,108 @@ static void load_settings(void)
             snprintf(dir, sizeof dir, "%s\\game", s_dir);
     }
     SetDlgItemTextA(s_wnd, ID_PATH, dir);
-    SendDlgItemMessageA(s_wnd, ID_RES, CB_SETCURSEL, ini_int("resolution", 0), 0);
-    SendDlgItemMessageA(s_wnd, ID_ASPECT, CB_SETCURSEL, ini_int("aspect", 0), 0);
-    SendDlgItemMessageA(s_wnd, ID_MSAA, CB_SETCURSEL, ini_int("msaa", 2), 0);
-    SendDlgItemMessageA(s_wnd, ID_ANISO, CB_SETCURSEL, ini_int("aniso", 3), 0);
-    SendDlgItemMessageA(s_wnd, ID_DRAWDIST, CB_SETCURSEL, ini_int("draw_distance", 1), 0);
-    SendDlgItemMessageA(s_wnd, ID_SHADOWS, CB_SETCURSEL, ini_int("shadows", 1), 0);
-    SendDlgItemMessageA(s_wnd, ID_AUDIO, CB_SETCURSEL, ini_int("audio_output", 0), 0);
-    CheckDlgButton(s_wnd, ID_FULLSCREEN, ini_int("fullscreen", 0));
-    CheckDlgButton(s_wnd, ID_CRT, ini_int("crt", 0));
-    CheckDlgButton(s_wnd, ID_MBLUR, ini_int("motion_blur", 0));
-    CheckDlgButton(s_wnd, ID_CAM, ini_int("modern_camera", 0));
-    CheckDlgButton(s_wnd, ID_FPS, ini_int("fps_counter", 0));
-    CheckDlgButton(s_wnd, ID_HDTEX, ini_int("hd_textures", 1));
-    CheckDlgButton(s_wnd, ID_HUDEDGES, ini_int("hud_edges", 1));
-    CheckDlgButton(s_wnd, ID_SKIPINTRO, ini_int("skip_intro", 1));
-    CheckDlgButton(s_wnd, ID_FASTBOOT, ini_int("fast_boot", 1));
-    CheckDlgButton(s_wnd, ID_DEBUGMENU, ini_int("debug_menu", 0));
-    CheckDlgButton(s_wnd, ID_MONEY, ini_int("money_cheat", 0));
-    SendDlgItemMessageA(s_wnd, ID_LOGLEVEL, CB_SETCURSEL, ini_int("log_level", 2), 0);
+    for (i = 0; i < NSETTINGS; i++)
+        set_control(i, (int)GetPrivateProfileIntA("launcher", k_settings[i].key, k_settings[i].def, s_ini));
     update_status();
 }
 
 static void save_settings(void)
 {
-    char dir[MAX_PATH];
+    char dir[MAX_PATH], b[16];
+    int i;
     GetDlgItemTextA(s_wnd, ID_PATH, dir, sizeof dir);
     WritePrivateProfileStringA("launcher", "game_dir", dir, s_ini);
-    ini_set_int("resolution", (int)SendDlgItemMessageA(s_wnd, ID_RES, CB_GETCURSEL, 0, 0));
-    ini_set_int("aspect", (int)SendDlgItemMessageA(s_wnd, ID_ASPECT, CB_GETCURSEL, 0, 0));
-    ini_set_int("msaa", (int)SendDlgItemMessageA(s_wnd, ID_MSAA, CB_GETCURSEL, 0, 0));
-    ini_set_int("aniso", (int)SendDlgItemMessageA(s_wnd, ID_ANISO, CB_GETCURSEL, 0, 0));
-    ini_set_int("draw_distance", (int)SendDlgItemMessageA(s_wnd, ID_DRAWDIST, CB_GETCURSEL, 0, 0));
-    ini_set_int("shadows", (int)SendDlgItemMessageA(s_wnd, ID_SHADOWS, CB_GETCURSEL, 0, 0));
-    ini_set_int("audio_output", (int)SendDlgItemMessageA(s_wnd, ID_AUDIO, CB_GETCURSEL, 0, 0));
-    ini_set_int("fullscreen", IsDlgButtonChecked(s_wnd, ID_FULLSCREEN) == BST_CHECKED);
-    ini_set_int("crt", IsDlgButtonChecked(s_wnd, ID_CRT) == BST_CHECKED);
-    ini_set_int("motion_blur", IsDlgButtonChecked(s_wnd, ID_MBLUR) == BST_CHECKED);
-    ini_set_int("modern_camera", IsDlgButtonChecked(s_wnd, ID_CAM) == BST_CHECKED);
-    ini_set_int("fps_counter", IsDlgButtonChecked(s_wnd, ID_FPS) == BST_CHECKED);
-    ini_set_int("hd_textures", IsDlgButtonChecked(s_wnd, ID_HDTEX) == BST_CHECKED);
-    ini_set_int("hud_edges", IsDlgButtonChecked(s_wnd, ID_HUDEDGES) == BST_CHECKED);
-    ini_set_int("skip_intro", IsDlgButtonChecked(s_wnd, ID_SKIPINTRO) == BST_CHECKED);
-    ini_set_int("fast_boot", IsDlgButtonChecked(s_wnd, ID_FASTBOOT) == BST_CHECKED);
-    ini_set_int("debug_menu", IsDlgButtonChecked(s_wnd, ID_DEBUGMENU) == BST_CHECKED);
-    ini_set_int("money_cheat", IsDlgButtonChecked(s_wnd, ID_MONEY) == BST_CHECKED);
-    ini_set_int("log_level", (int)SendDlgItemMessageA(s_wnd, ID_LOGLEVEL, CB_GETCURSEL, 0, 0));
+    for (i = 0; i < NSETTINGS; i++) {
+        snprintf(b, sizeof b, "%d", get_control(i));
+        WritePrivateProfileStringA("launcher", k_settings[i].key, b, s_ini);
+    }
+}
+
+/* Every option back to its default; the game folder stays. */
+static void reset_settings(void)
+{
+    int i;
+    if (MessageBoxA(s_wnd, "Put every setting back to its default? The game folder is kept.", "SSX 3",
+                    MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+        return;
+    for (i = 0; i < NSETTINGS; i++)
+        set_control(i, k_settings[i].def);
+    save_settings();
+}
+
+/* ---- update check -------------------------------------------------------- */
+
+/* "v0.2.4", "v0.2.4-3-gabc1234-dirty" -> 0x000204; 0 when not a version */
+static unsigned version_of(const char *s)
+{
+    unsigned a, b, c;
+    if (!s || (*s != 'v' && *s != 'V') || sscanf(s + 1, "%u.%u.%u", &a, &b, &c) != 3)
+        return 0;
+    return a << 16 | b << 8 | c;
+}
+
+/* The latest release's tag from GitHub's API (one small request, on its
+ * own thread so the window never waits; any failure says nothing). */
+static DWORD WINAPI update_thread(LPVOID unused)
+{
+    HINTERNET ses = NULL, con = NULL, req = NULL;
+    char *body = NULL, *tag = NULL;
+    DWORD got = 0, n;
+    (void)unused;
+    ses = WinHttpOpen(L"SSX3-recomp-launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                      WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!ses)
+        goto out;
+    WinHttpSetTimeouts(ses, 5000, 5000, 5000, 5000);
+    con = WinHttpConnect(ses, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!con)
+        goto out;
+    req = WinHttpOpenRequest(con, L"GET", L"/repos/koenhendriks/SSX3-recomp/releases/latest", NULL,
+                             WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!req || !WinHttpSendRequest(req, L"Accept: application/vnd.github+json\r\n", (DWORD)-1L,
+                                    WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+        || !WinHttpReceiveResponse(req, NULL))
+        goto out;
+    if (!(body = (char *)malloc(65536)))
+        goto out;
+    while (got < 65535 && WinHttpReadData(req, body + got, 65535 - got, &n) && n)
+        got += n;
+    body[got] = 0;
+    {
+        const char *t = strstr(body, "\"tag_name\""), *q, *e;
+        if (t && (q = strchr(t + 10, '"')) != NULL && (e = strchr(q + 1, '"')) != NULL && e - q < 32) {
+            if ((tag = (char *)malloc((size_t)(e - q))) != NULL) {
+                memcpy(tag, q + 1, (size_t)(e - q - 1));
+                tag[e - q - 1] = 0;
+            }
+        }
+    }
+out:
+    free(body);
+    if (req) WinHttpCloseHandle(req);
+    if (con) WinHttpCloseHandle(con);
+    if (ses) WinHttpCloseHandle(ses);
+    if (!tag || !PostMessageA(s_wnd, WM_UPDATE, 0, (LPARAM)tag))
+        free(tag);
+    return 0;
+}
+
+static int s_update_newer;
+
+static void update_answer(char *tag)
+{
+    char t[128];
+    unsigned mine = version_of(SSX3_BUILD_COMMIT), latest = version_of(tag);
+    s_update_newer = latest && latest > mine;
+    if (s_update_newer && mine)
+        snprintf(t, sizeof t, "%s is available: click to download", tag);
+    else if (s_update_newer)
+        snprintf(t, sizeof t, "Latest release: %s (click to open)", tag);
+    else
+        snprintf(t, sizeof t, "Up to date");
+    SetDlgItemTextA(s_wnd, ID_UPDATE, t);
+    InvalidateRect(GetDlgItem(s_wnd, ID_UPDATE), NULL, TRUE);
+    free(tag);
 }
 
 /* ---- launch -------------------------------------------------------------- */
@@ -478,111 +560,119 @@ static void make_fonts(void)
     s_title = CreateFontIndirectA(&lf);
 }
 
+/* A label and a dropdown filled from a table, one row. */
+#define LCOMBO(text, id, table, x, y) do { \
+        HWND cb_; int i_; \
+        add("STATIC", text, 0, -1, (x), (y) + 4, 115, 20, s_font); \
+        cb_ = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, id, (x) + 120, (y), 270, 200, s_font); \
+        for (i_ = 0; i_ < (int)(sizeof table / sizeof table[0]); i_++) \
+            SendMessageA(cb_, CB_ADDSTRING, 0, (LPARAM)table[i_].label); \
+    } while (0)
+#define LCHECK(text, id, x, y) add("BUTTON", text, BS_AUTOCHECKBOX | WS_TABSTOP, id, (x), (y), 390, 22, s_font)
+
 static void build(void)
 {
-    int y = 14, i;
+    int y = 14, ya, yb, i, xa = 20, xb = 450;
     HWND cb;
-    char auto_res[96];
+    char auto_res[96], sub[128];
     add("STATIC", "SSX 3", 0, -1, 20, y, 300, 30, s_title);
-    add("STATIC", "static recompilation for Windows", 0, -1, 104, y + 11, 300, 18, s_font);
+    snprintf(sub, sizeof sub, "static recompilation for Windows   %s", SSX3_BUILD_COMMIT);
+    add("STATIC", sub, 0, -1, 104, y + 11, 330, 18, s_font);
+    add("STATIC", "", SS_NOTIFY | SS_RIGHT, ID_UPDATE, 440, y + 11, 400, 18, s_font);
     y += 44;
 
     add("STATIC", "Game files", 0, -1, 20, y, 400, 18, s_bold);
     y += 22;
-    add("EDIT", "", WS_BORDER | ES_AUTOHSCROLL, ID_PATH, 20, y, 382, 24, s_font);
-    add("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_BROWSE, 410, y - 1, 90, 26, s_font);
+    add("EDIT", "", WS_BORDER | ES_AUTOHSCROLL, ID_PATH, 20, y, 722, 24, s_font);
+    add("BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP, ID_BROWSE, 750, y - 1, 90, 26, s_font);
     y += 30;
-    add("STATIC", "", 0, ID_STATUS, 20, y, 480, 34, s_font);
-    y += 40;
+    add("STATIC", "", 0, ID_STATUS, 20, y, 820, 20, s_font);
+    y += 30;
 
-    add("STATIC", "Display", 0, -1, 20, y, 400, 18, s_bold);
-    y += 24;
-    add("STATIC", "Resolution", 0, -1, 20, y + 4, 110, 20, s_font);
-    cb = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ID_RES, 140, y, 260, 200, s_font);
+    /* left column: how it looks */
+    ya = y;
+    add("STATIC", "Display", 0, -1, xa, ya, 400, 18, s_bold);
+    ya += 24;
+    LCOMBO("Resolution", ID_RES, k_res, xa, ya);
+    cb = GetDlgItem(s_wnd, ID_RES);
     snprintf(auto_res, sizeof auto_res, "Auto (your monitor: %dp)", GetSystemMetrics(SM_CYSCREEN));
-    for (i = 0; i < (int)(sizeof k_res / sizeof k_res[0]); i++)
-        SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)(i ? k_res[i].label : auto_res));
-    y += 30;
-    add("STATIC", "Aspect ratio", 0, -1, 20, y + 4, 110, 20, s_font);
-    cb = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ID_ASPECT, 140, y, 260, 200, s_font);
-    for (i = 0; i < (int)(sizeof k_aspect / sizeof k_aspect[0]); i++)
-        SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)k_aspect[i].label);
-    y += 30;
-    add("STATIC", "Anti-aliasing", 0, -1, 20, y + 4, 110, 20, s_font);
-    cb = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ID_MSAA, 140, y, 260, 200, s_font);
-    for (i = 0; i < (int)(sizeof k_msaa / sizeof k_msaa[0]); i++)
-        SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)k_msaa[i].label);
-    y += 30;
-    add("STATIC", "Texture filtering", 0, -1, 20, y + 4, 115, 20, s_font);
-    cb = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ID_ANISO, 140, y, 260, 200, s_font);
-    for (i = 0; i < (int)(sizeof k_aniso / sizeof k_aniso[0]); i++)
-        SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)k_aniso[i].label);
-    y += 30;
-    add("STATIC", "Draw distance", 0, -1, 20, y + 4, 115, 20, s_font);
-    cb = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ID_DRAWDIST, 140, y, 260, 200, s_font);
-    for (i = 0; i < (int)(sizeof k_drawdist / sizeof k_drawdist[0]); i++)
-        SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)k_drawdist[i].label);
-    y += 30;
-    add("STATIC", "Shadow quality", 0, -1, 20, y + 4, 115, 20, s_font);
-    cb = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ID_SHADOWS, 140, y, 260, 200, s_font);
-    for (i = 0; i < (int)(sizeof k_shadows / sizeof k_shadows[0]); i++)
-        SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)k_shadows[i].label);
-    y += 30;
-    add("STATIC", "Audio output", 0, -1, 20, y + 4, 115, 20, s_font);
-    cb = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ID_AUDIO, 140, y, 260, 200, s_font);
-    for (i = 0; i < (int)(sizeof k_audio / sizeof k_audio[0]); i++)
-        SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)k_audio[i].label);
-    y += 32;
-    add("BUTTON", "Fullscreen (F11 toggles in game)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_FULLSCREEN, 20, y, 300, 22, s_font);
-    y += 24;
-    add("BUTTON", "CRT TV shader (needs a resolution above 480p)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_CRT, 20, y, 400, 22, s_font);
-    y += 24;
-    add("BUTTON", "Motion blur (riders stay sharp)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_MBLUR, 20, y, 300, 22, s_font);
-    y += 24;
-    add("BUTTON", "Modern camera (smoother follow, speed FOV, shake)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_CAM, 20, y, 400, 22, s_font);
-    y += 24;
-    add("BUTTON", "FPS counter (F3 toggles in game)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_FPS, 20, y, 300, 22, s_font);
-    y += 24;
-    add("BUTTON", "HD textures (Bl4ckH4nd's HD texture pack)",
-        BS_AUTOCHECKBOX | WS_TABSTOP, ID_HDTEX, 20, y, 480, 22, s_font);
-    y += 24;
-    add("BUTTON", "HUD at the screen edges (widescreen)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_HUDEDGES,
-        20, y, 480, 22, s_font);
-    y += 34;
+    SendMessageA(cb, CB_DELETESTRING, 0, 0);
+    SendMessageA(cb, CB_INSERTSTRING, 0, (LPARAM)auto_res);
+    ya += 30;
+    LCOMBO("Aspect ratio", ID_ASPECT, k_aspect, xa, ya);
+    ya += 32;
+    LCHECK("Fullscreen (F11 toggles in game)", ID_FULLSCREEN, xa, ya);
+    ya += 24;
+    LCHECK("HUD at the screen edges (widescreen)", ID_HUDEDGES, xa, ya);
+    ya += 24;
+    LCHECK("FPS counter (F3 toggles in game)", ID_FPS, xa, ya);
+    ya += 24;
+    LCHECK("CRT TV shader (needs a resolution above 480p)", ID_CRT, xa, ya);
+    ya += 34;
 
-    add("STATIC", "Game", 0, -1, 20, y, 400, 18, s_bold);
-    y += 24;
-    add("BUTTON", "Skip the intro movies", BS_AUTOCHECKBOX | WS_TABSTOP, ID_SKIPINTRO, 20, y, 300, 22, s_font);
-    y += 24;
-    add("BUTTON", "Fast boot (shorter title and hard-disk-check waits)", BS_AUTOCHECKBOX | WS_TABSTOP,
-        ID_FASTBOOT, 20, y, 480, 22, s_font);
-    y += 24;
-    add("BUTTON", "Debug mode: EA's quick-start menu (press Start on the title screen)",
-        BS_AUTOCHECKBOX | WS_TABSTOP, ID_DEBUGMENU, 20, y, 480, 22, s_font);
-    y += 24;
-    add("BUTTON", "Testing: Home key gives player 1 200,000 money", BS_AUTOCHECKBOX | WS_TABSTOP,
-        ID_MONEY, 20, y, 480, 22, s_font);
-    y += 28;
-    add("STATIC", "Log detail", 0, -1, 20, y + 4, 115, 20, s_font);
-    cb = add("COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ID_LOGLEVEL, 140, y, 260, 200, s_font);
-    for (i = 0; i < (int)(sizeof k_loglevel / sizeof k_loglevel[0]); i++)
-        SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)k_loglevel[i].label);
-    SendMessageA(cb, CB_SETCURSEL, 2, 0);
-    y += 38;
+    add("STATIC", "Graphics", 0, -1, xa, ya, 400, 18, s_bold);
+    ya += 24;
+    LCOMBO("Anti-aliasing", ID_MSAA, k_msaa, xa, ya);
+    ya += 30;
+    LCOMBO("Texture filtering", ID_ANISO, k_aniso, xa, ya);
+    ya += 30;
+    LCOMBO("Draw distance", ID_DRAWDIST, k_drawdist, xa, ya);
+    ya += 30;
+    LCOMBO("Shadow quality", ID_SHADOWS, k_shadows, xa, ya);
+    ya += 32;
+    LCHECK("HD textures (Bl4ckH4nd's HD texture pack)", ID_HDTEX, xa, ya);
+    ya += 24;
+    LCHECK("Motion blur (riders stay sharp)", ID_MBLUR, xa, ya);
+    ya += 24;
+    LCHECK("Modern camera (smoother follow, speed FOV, shake)", ID_CAM, xa, ya);
+    ya += 24;
 
-    add("STATIC", "Controllers", 0, -1, 20, y, 400, 18, s_bold);
-    y += 22;
-    for (i = 0; i < 4; i++, y += 21)
-        add("STATIC", "", 0, ID_PAD0 + i, 20, y, 480, 20, s_font);
+    /* right column: sound, game, logs, controllers */
+    yb = y;
+    add("STATIC", "Audio", 0, -1, xb, yb, 380, 18, s_bold);
+    yb += 24;
+    LCOMBO("Audio output", ID_AUDIO, k_audio, xb, yb);
+    yb += 40;
+
+    add("STATIC", "Game", 0, -1, xb, yb, 380, 18, s_bold);
+    yb += 24;
+    LCHECK("Skip the intro movies", ID_SKIPINTRO, xb, yb);
+    yb += 24;
+    LCHECK("Fast boot (shorter title and hard-disk waits)", ID_FASTBOOT, xb, yb);
+    yb += 24;
+    LCHECK("Debug mode: EA's quick-start menu", ID_DEBUGMENU, xb, yb);
+    yb += 24;
+    LCHECK("Testing: Home key gives 200,000 money", ID_MONEY, xb, yb);
+    yb += 24;
+    LCHECK("Check for updates at start (asks GitHub)", ID_UPDATES, xb, yb);
+    yb += 34;
+
+    add("STATIC", "Logs", 0, -1, xb, yb, 380, 18, s_bold);
+    yb += 24;
+    LCOMBO("Log detail", ID_LOGLEVEL, k_loglevel, xb, yb);
+    yb += 32;
+    add("BUTTON", "Open logs", BS_PUSHBUTTON | WS_TABSTOP, ID_LOGS, xb, yb, 100, 28, s_font);
+    add("STATIC", "Saw a problem? Press F12 in game to mark it, then send the newest log.", 0, -1,
+        xb + 112, yb - 2, 278, 36, s_font);
+    yb += 44;
+
+    add("STATIC", "Controllers", 0, -1, xb, yb, 380, 18, s_bold);
+    yb += 22;
+    for (i = 0; i < 4; i++, yb += 21)
+        add("STATIC", "", 0, ID_PAD0 + i, xb, yb, 390, 20, s_font);
     add("STATIC", "Plug in controllers before pressing Play; two or more enable Multi Play. "
-        "The keyboard always works as player 1 (keys.ini).", 0, ID_KEYS, 20, y + 2, 480, 34, s_font);
-    y += 46;
+        "The keyboard always works as player 1 (keys.ini).", 0, ID_KEYS, xb, yb + 2, 390, 34, s_font);
+    yb += 40;
 
-    add("BUTTON", "Open logs", BS_PUSHBUTTON | WS_TABSTOP, ID_LOGS, 20, y, 100, 30, s_font);
-    add("BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_PLAY, 380, y, 120, 30, s_bold);
+    y = (ya > yb ? ya : yb) + 8;
+    add("STATIC", "In game:  F3 FPS counter   F4 HD textures   F5 draw distance   F6 shadows   "
+        "F11 fullscreen   F12 mark a problem (or click both sticks)", 0, -1, 20, y, 820, 20, s_font);
+    y += 30;
+    add("BUTTON", "Reset to defaults", BS_PUSHBUTTON | WS_TABSTOP, ID_RESET, 20, y, 130, 30, s_font);
+    add("BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_PLAY, 720, y, 120, 30, s_bold);
     y += 46;
     {
-        RECT r = {0, 0, S(520), S(y)};
+        RECT r = {0, 0, S(860), S(y)};
         AdjustWindowRectEx(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
         SetWindowPos(s_wnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
     }
@@ -600,6 +690,20 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             return 0;
         case ID_PLAY: if (s_game_ok) play(); return 0;
         case ID_LOGS: open_logs(); return 0;
+        case ID_RESET: reset_settings(); return 0;
+        case ID_UPDATE:
+            if (s_update_newer && HIWORD(w) == STN_CLICKED)
+                ShellExecuteA(h, "open", RELEASES, NULL, NULL, SW_SHOWNORMAL);
+            return 0;
+        }
+        break;
+    case WM_UPDATE:
+        update_answer((char *)l);
+        return 0;
+    case WM_SETCURSOR:
+        if ((HWND)w == GetDlgItem(h, ID_UPDATE) && s_update_newer) {
+            SetCursor(LoadCursor(NULL, IDC_HAND));
+            return TRUE;
         }
         break;
     case WM_TIMER:
@@ -610,6 +714,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         SetBkMode(dc, TRANSPARENT);
         if ((HWND)l == GetDlgItem(h, ID_STATUS))
             SetTextColor(dc, s_game_ok ? RGB(0, 120, 40) : RGB(190, 40, 30));
+        else if ((HWND)l == GetDlgItem(h, ID_UPDATE))
+            SetTextColor(dc, s_update_newer ? RGB(0, 90, 200) : RGB(110, 110, 110));
         return (LRESULT)s_bg;
     }
     case WM_CLOSE:
@@ -662,13 +768,15 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
     RegisterClassA(&wc);
     s_wnd = CreateWindowExA(0, wc.lpszClassName, "SSX 3 Launcher",
                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                            CW_USEDEFAULT, CW_USEDEFAULT, S(520), S(600), NULL, NULL, inst, NULL);
+                            CW_USEDEFAULT, CW_USEDEFAULT, S(860), S(600), NULL, NULL, inst, NULL);
     if (!s_wnd)
         return 1;
     build();
     load_settings();
     update_pads();
     SetTimer(s_wnd, ID_TIMER, 1000, NULL);
+    if (IsDlgButtonChecked(s_wnd, ID_UPDATES) == BST_CHECKED)
+        CloseHandle(CreateThread(NULL, 0, update_thread, NULL, 0, NULL));
     {
         /* centre on the screen */
         RECT r, wa;
