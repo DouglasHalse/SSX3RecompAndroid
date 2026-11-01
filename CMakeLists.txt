@@ -80,7 +80,6 @@ set(GAME_SOURCES
     src/settings.c
     src/in_game_menu.c
     src/settings_page.c
-    src/probe.c
     src/ui_font.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c

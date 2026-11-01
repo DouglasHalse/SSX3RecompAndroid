@@ -15,6 +15,7 @@
  * pressing A on it opens this page instead of the credits reel.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "settings.h"
@@ -140,7 +141,7 @@ static void select_first(void)
         s_sel++;
 }
 
-static void draw(uint32_t *px, int w, int h)
+static void draw(uint32_t *px, uint32_t w, uint32_t h)
 {
     float s;
     int x0, x1, y0, line, size, i, vis, sel_line = 0;

@@ -36,6 +36,7 @@
 #include "log.h"
 #include "journal.h"
 #include "settings.h"
+#include "settings_page.h"
 #include "in_game_menu.h"
 #ifdef _WIN32
 #include <windows.h>
