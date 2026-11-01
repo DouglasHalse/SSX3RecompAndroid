@@ -246,7 +246,7 @@ The launcher's choices are these environment variables:
 | `RECOMP_MSAA` | `4` | anti-aliasing: `0` off, `2`, `4`, `8` samples (as far as the GPU goes); cut-out edges (trees, fences) are smoothed too |
 | `RECOMP_HDTEX` | `hd-textures` | the HD texture pack (Bl4ckH4nd's, see below) and its `ssx3_map.txt`; `0` = off |
 | `RECOMP_FPS30` | `0` | `1` = keep the game's own 30 FPS stretches (split screen, Metro-City's tunnel); by default they render at 60 |
-| `RECOMP_FPS_OVERLAY` | `0` | `1` = start with the FPS counter on (F3 toggles it): game FPS, frames shown, slowest frame; Windows |
+| `RECOMP_FPS_OVERLAY` | `0` | `1` = start with the FPS counter on. On Android it is the launcher's **FPS counter** switch, and the line reads `FPS 60`; on Windows F3 toggles it and the line also carries frames shown and the slowest frame |
 
 **Keyboard.** The game window must have focus. Remap the keys by copying
 `keys.example.ini` to `keys.ini` and editing it.
