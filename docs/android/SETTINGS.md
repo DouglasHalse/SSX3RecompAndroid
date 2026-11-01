@@ -24,6 +24,7 @@ experiment overrides a saved choice.
 | Display | Aspect ratio | Fill screen / 4:3 (original) | `RECOMP_WIDESCREEN` | `auto` |
 | Display | Modern camera | Off / On | `RECOMP_CAM` | off |
 | Display | FPS counter | Off / On | `RECOMP_FPS_OVERLAY` | off |
+| Display | Render resolution | Panel / 720p / Original (480) | `RECOMP_RES` | Panel |
 | Graphics | Anti-aliasing | Off / 2x / 4x / 8x | `RECOMP_MSAA` | off |
 | Graphics | Anisotropic filtering | Trilinear / 4x / 8x / 16x | `RECOMP_ANISO` | 4x |
 | Graphics | Draw distance | Original / Far / Maximum | `RECOMP_DRAW_DIST` | original |
