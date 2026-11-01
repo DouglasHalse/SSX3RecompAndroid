@@ -63,6 +63,7 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "src/recomp/gen/*.c")
 set(GAME_SOURCES
     src/main.c
     src/log.c
+    src/prof.c
     src/journal.c
     src/mark.c
     src/live.c

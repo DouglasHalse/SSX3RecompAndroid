@@ -50,6 +50,58 @@ distance 2x, shadows 8x, widescreen.
 3. `RECOMP_VBLANK_HZ=30` does **not** do it: the presenter still ran at 60 and the
    guest did not slow down.
 
+## Inside the frame: where the CPU goes
+
+No perf events on this phone: `perf_event_open` refuses every event type for the
+shell user (`cpu-cycles`, `cpu-clock`, `task-clock`, all "not supported on the
+device"), so simpleperf is useless here. The sampler lives in the app instead
+(`src/prof.c`): `RECOMP_PROFILE=<path>` arms `ITIMER_PROF` at 1 kHz,
+`RECOMP_PROFILE_DELAY=<s>` holds it off until the loading screens are gone, and
+each sample records the interrupted PC plus its host thread. Offsets are
+resolved against the unstripped `libmain.so`, and system libraries by their own
+`dladdr` module plus a pulled copy of the library.
+
+A 20 s Snow Jam sample at 480p, by thread:
+
+| thread | share | what it is doing |
+|---|---|---|
+| render / pushbuffer | 31% | `fetch_attr` 14%, `nv2a_exec_tex_info` 7%, `nv2a_pb_exec_method` 6%, `fetch_inputs` 5%, driver 9% |
+| guest (recompiled) | 25% | `sub_00234A10` 7%, `recomp_fp_round24` 5%, linker64 11% |
+| GPU register poller | 13% | 95% of its own samples in `sched_yield` |
+| present (SDL thread) | 10% | `xbox_FramebufferApplyGamma` 27%, driver 14%, `libSDL2` 12% |
+
+By module, and this is the part that decides what to work on:
+
+| module | share |
+|---|---|
+| libmain.so (guest, renderer, toolkit) | 42% |
+| libc.so — of which `sched_yield` alone | 33% — **16% of all samples** |
+| vulkan.samsung.so | 12% |
+| [vdso] (clock reads) | 4% |
+| linker64 | 4% |
+
+So a sixth of the CPU was one syscall: `YieldProcessor()` is `#define
+YieldProcessor() sched_yield()` in the POSIX shim, so every spin in the toolkit
+— and the GPU register poller is one — asks the scheduler for a context switch.
+Turning it into the real pause instruction removed the yields (16% -> 0.1%) and
+then measured **worse**: 49.0 FPS against 55.0 for the yield, back to back at
+480p/41 C. The thread is latency-critical (the title spins on the PFB flush bit
+it clears), so the spin defeats itself through power and cluster contention. The
+shim keeps `sched_yield`, with that measurement in the comment; the fix that
+would not trade one for the other is to wake the poller from the register write
+that needs it instead of polling.
+
+Two smaller notes from the same sample: `recomp_fp_round24` is 5% of the guest
+thread (per-operation FP rounding for Xbox semantics, so it is correctness work,
+not waste), and 11% of the guest thread sits in `linker64` — consistent with
+general-dynamic TLS (`__tls_get_addr`) on the hot path, which the initial-exec
+model would remove for a library that is loaded at start.
+
+Sustained play is the other half of the heat story: after an hour of repeated
+runs at 480p the same build measured 46 FPS at 44.5 C where it had started at
+58 FPS at 39 C. The phone throttles, and every measurement above is only
+comparable with an A/B run back to back and at the same battery temperature.
+
 ## Reproducing
 
     scripts/perf_bench.sh A 1080 2      # label, RECOMP_RES, RECOMP_MSAA

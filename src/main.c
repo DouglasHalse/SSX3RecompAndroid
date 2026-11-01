@@ -893,6 +893,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
+    {   /* RECOMP_PROFILE=<path>: where the guest's own time goes (prof.c).
+         * The phone's kernel offers no perf events, so the sampler lives here. */
+        extern void ssx3_prof_start(const char *path);
+        const char *prof = getenv("RECOMP_PROFILE");
+        if (prof && *prof)
+            ssx3_prof_start(prof);
+    }
+
     /* Runtime options SSX 3 needs; set before anything reads them, and only
      * when not already set, so a run can still override them.
      *   RECOMP_TITLE_KEVENTS: XAPI's timer thread (guest 0x0021C1B5) and D3D

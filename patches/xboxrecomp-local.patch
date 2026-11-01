@@ -1942,7 +1942,7 @@ index 0000000..45b6a74
 +}
 +#endif
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index c65ba43..79cb9fb 100644
+index c65ba43..8e037f8 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -26,6 +26,7 @@
@@ -2790,7 +2790,7 @@ index c65ba43..79cb9fb 100644
      g_eax = va;
  }
  
-@@ -9371,14 +9864,218 @@ static int guest_cpu_enabled(void)
+@@ -9371,14 +9864,219 @@ static int guest_cpu_enabled(void)
      return g_guest_cpu_on;
  }
  
@@ -2934,17 +2934,18 @@ index c65ba43..79cb9fb 100644
 +    if (t_guest_held) {
 +        LONG gen = g_guest_gen;
 +        int waiting = fair_yield_on() && g_guest_waiters > 0;
-+        t_guest_held = 0;
-+        LeaveCriticalSection(&g_guest_cpu);
++        /* Nobody wants the CPU: keep it. Dropping and re-taking it here costs a
++         * sched_yield on every quantum -- a fifth of the guest's CPU time on the
++         * phone -- and buys a hand-over nobody asked for. */
 +        if (waiting) {
++            t_guest_held = 0;
++            LeaveCriticalSection(&g_guest_cpu);
 +            DWORD t0 = xbox_TickCountMs();
 +            while (g_guest_gen == gen && xbox_TickCountMs() - t0 < 5)
 +                SwitchToThread();
-+        } else {
-+            SwitchToThread();
++            guest_cpu_acquire(prio_index(t_guest_prio));
++            t_guest_held = 1;
 +        }
-+        guest_cpu_acquire(prio_index(t_guest_prio));
-+        t_guest_held = 1;
 +    }
 +}
 +
@@ -3009,7 +3010,7 @@ index c65ba43..79cb9fb 100644
      }
  }
  
-@@ -9391,11 +10088,160 @@ void guest_cpu_part(void)
+@@ -9391,11 +10089,160 @@ void guest_cpu_part(void)
      t_guest_thread = 0;
  }
  
@@ -3171,7 +3172,7 @@ index c65ba43..79cb9fb 100644
      if (held) {                        /* let other guest threads run meanwhile */
          t_guest_held = 0;
          LeaveCriticalSection(&g_guest_cpu);
-@@ -9403,11 +10249,16 @@ static void kernel_thunk_dispatch(void)
+@@ -9403,11 +10250,16 @@ static void kernel_thunk_dispatch(void)
      t_dispatch_depth++;
      kernel_thunk_dispatch_body();
      t_dispatch_depth--;
@@ -3189,7 +3190,7 @@ index c65ba43..79cb9fb 100644
          t_guest_held = 1;
      }
      (void)held;
-@@ -9447,9 +10298,9 @@ static void kernel_thunk_dispatch_body(void)
+@@ -9447,9 +10299,9 @@ static void kernel_thunk_dispatch_body(void)
  
      {
          static DWORD last_summary_tick = 0;
@@ -3201,7 +3202,7 @@ index c65ba43..79cb9fb 100644
              fprintf(stderr, "  [KERNEL] summary: %lld total calls, latest ordinal %u (slot %d) esp=0x%08X\n",
                      g_kernel_call_count, ordinal, slot, g_esp);
              /* And which ones, ranked. "Latest" names whatever the sample
-@@ -9671,7 +10522,7 @@ void xbox_kernel_bridge_init(void)
+@@ -9671,7 +10523,7 @@ void xbox_kernel_bridge_init(void)
      /* The thunk table lives in .rdata which is marked PAGE_READONLY.
       * Temporarily make it writable so we can patch the ordinals. */
      VirtualProtect(
@@ -3210,7 +3211,7 @@ index c65ba43..79cb9fb 100644
          g_thunk_table_count * 4,
          PAGE_READWRITE,
          &old_protect
-@@ -9749,7 +10600,7 @@ void xbox_kernel_bridge_init(void)
+@@ -9749,7 +10601,7 @@ void xbox_kernel_bridge_init(void)
          DWORD scan_protect;
          uint32_t low = g_thunk_table_base - LOOKBEHIND * 4;
  
@@ -3219,7 +3220,7 @@ index c65ba43..79cb9fb 100644
                         LOOKBEHIND * 4, PAGE_READWRITE, &scan_protect);
  
          for (i = 1; i <= LOOKBEHIND; i++) {
-@@ -9778,13 +10629,13 @@ void xbox_kernel_bridge_init(void)
+@@ -9778,13 +10630,13 @@ void xbox_kernel_bridge_init(void)
                      va, g_slot_ordinals[slot], slot);
          }
  
@@ -3235,6 +3236,7 @@ index c65ba43..79cb9fb 100644
          g_thunk_table_count * 4,
          old_protect,
          &old_protect
+
 diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
 index 42135e0..f63e442 100644
 --- a/src/kernel/kernel_file.c
@@ -7144,7 +7146,7 @@ index 0b2d723..f612ac4 100644
      fflush(stderr);
  }
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 72d5131..bd971b1 100644
+index 72d5131..514372f 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -191,11 +191,11 @@ static const struct { uint32_t offset; uint32_t busy_mask; } NV2A_ACK[] = {
@@ -7352,7 +7354,7 @@ index 72d5131..bd971b1 100644
      n = (s_fb_pitch * s_fb_height) / 4;
      for (i = 0; i < n; i++) {
          sum = sum * 33u + p[i];
-@@ -873,6 +925,147 @@ static void framebuffer_probe_tick(void)
+@@ -873,15 +925,167 @@ static void framebuffer_probe_tick(void)
      fflush(stderr);
  }
  
@@ -7487,12 +7489,12 @@ index 72d5131..bd971b1 100644
 +            if ((*r & NV2A_IDLE[i].idle_mask) != NV2A_IDLE[i].idle_mask)
 +                *r |= NV2A_IDLE[i].idle_mask;
 +        }
-+        if (++spin & 63)
-+            YieldProcessor();
-+        else {
-+            QueryPerformanceCounter(&now);
-+            Sleep(idle_ticks > 0 && now.QuadPart - last.QuadPart > idle_ticks ? 1 : 0);
-+        }
++        QueryPerformanceCounter(&now);
++        if (idle_ticks > 0 && now.QuadPart - last.QuadPart > idle_ticks)
++            Sleep(1);              /* quiet: block instead of asking for a switch */
++        else
++            YieldProcessor();      /* burst: spin, a sched_yield here is a
++                                    * full context switch for a 20 us wait */
 +    }
 +    return 0;
 +}
@@ -7500,7 +7502,35 @@ index 72d5131..bd971b1 100644
  static DWORD WINAPI nv2a_ack_thread(LPVOID param)
  {
      volatile uint32_t *regs = (volatile uint32_t *)param;
-@@ -931,6 +1124,49 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
++    uint32_t prev_put = 0;
++    unsigned idle_passes = 0;
+     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
++        int work = 0;
++        /* Most passes find nothing to do. Notice that before spending a trip
++         * through the scheduler on it. */
++        uint32_t put_top = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
++        if (put_top != prev_put) {
++            prev_put = put_top;
++            work = 1;
++        }
+         for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
+             volatile uint32_t *r =
+                 (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
+             if (*r & NV2A_ACK[i].busy_mask) {
+                 *r &= ~NV2A_ACK[i].busy_mask;
++                work = 1;
+             }
+         }
+         for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
+@@ -889,6 +1093,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                 (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
+             if ((*r & NV2A_IDLE[i].idle_mask) != NV2A_IDLE[i].idle_mask) {
+                 *r |= NV2A_IDLE[i].idle_mask;
++                work = 1;
+             }
+         }
+         /* DMA_GET used to be set to DMA_PUT here, at the top of the tick,
+@@ -931,6 +1136,49 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              static uint32_t last_put;
              DWORD now_ms = GetTickCount();
              uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
@@ -7550,7 +7580,7 @@ index 72d5131..bd971b1 100644
              if (put != last_put || (now_ms - last_put_ms) > 2000) {
                  /* Survey the segment the title just submitted, once. */
                  {
-@@ -1034,8 +1270,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1034,8 +1282,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              static uint32_t last_start = 0xFFFFFFFFu;
              uint32_t start = *(volatile uint32_t *)((char *)regs + 0x600800);
              if (start != last_start) {
@@ -7562,19 +7592,31 @@ index 72d5131..bd971b1 100644
                  fflush(stderr);
              }
          }
-@@ -1054,21 +1292,59 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1054,21 +1304,70 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
           * up XNet. A live clock is also just the truth -- KeTickCount ticks on
           * hardware whether or not anyone is asleep. GetTickCount() shares the
           * millisecond unit, so the rate matches. */
 -        *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
 -                               + g_memory_offset) = GetTickCount();
 +        *(volatile uint32_t *)((uintptr_t)XBOX_HOST(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)) = xbox_TickCountMs();
++
++        /* Nothing to acknowledge and nothing submitted: yielding still costs a
++         * trip through the scheduler on every pass, and that is most of this
++         * thread's life. A millisecond of sleep is shorter than a frame at
++         * 60 Hz, so a kickoff is still answered within one frame. */
++        if (work) {
++            idle_passes = 0;
++            Sleep(0);
++        } else if (++idle_passes > 2) {
++            Sleep(1);
++        } else {
++            Sleep(0);
++        }
++    }
++    return 0;
++}
  
-         Sleep(0);  /* yield; the waiter is spinning on another core */
-     }
-     return 0;
- }
- 
+-        Sleep(0);  /* yield; the waiter is spinning on another core */
 +/* Write-1-to-clear for the vblank interrupt, without trapping MMIO.
 + *
 + * The vblank tick (kernel_bridge.c) raises PCRTC_INTR_0 = 1 | NV2A_VBLANK_MARK
@@ -7604,10 +7646,10 @@ index 72d5131..bd971b1 100644
 +            xbox_Nv2aSwmPulse();
 +        }
 +        Sleep(1);
-+    }
-+    return 0;
-+}
-+
+     }
+     return 0;
+ }
+ 
  static void xbox_Nv2aAckStart(void)
  {
 +    CloseHandle(CreateThread(NULL, 0, nv2a_intr_thread, g_nv2a_memory, 0, NULL));
@@ -7624,7 +7666,7 @@ index 72d5131..bd971b1 100644
      if (g_nv2a_ack_thread) {
          fprintf(stderr, "  NV2A busy-bit ack: %zu register(s) acknowledged\n",
                  sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]));
-@@ -1237,15 +1513,15 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
+@@ -1237,15 +1536,15 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
          /* The callee-saved registers and the stack, exactly as the CRT's
           * longjmp restores them: esp is the setjmp-time esp plus the return
           * address that setjmp's own ret would have popped. */
@@ -7645,7 +7687,7 @@ index 72d5131..bd971b1 100644
          g_ebp     = g_seh_ebp;
  
          s_jmp_used = i + 1;   /* the inner buffers died with their frames */
-@@ -1344,7 +1620,7 @@ static int watch_is_code(uint32_t va)
+@@ -1344,7 +1643,7 @@ static int watch_is_code(uint32_t va)
  static void watch_report(void)
  {
      const uint8_t *mem = (const uint8_t *)g_memory_offset;
@@ -7654,7 +7696,7 @@ index 72d5131..bd971b1 100644
      uint32_t esp = g_esp, i, shown = 0;
  
      if (now == g_watch_last)
-@@ -1362,7 +1638,7 @@ static void watch_report(void)
+@@ -1362,7 +1661,7 @@ static void watch_report(void)
          uint32_t v;
          if (!peek_readable(slot))
              break;
@@ -7663,7 +7705,7 @@ index 72d5131..bd971b1 100644
          if (watch_is_code(v)) {
              fprintf(stderr, "         [esp+%-4u] %08X\n", i * 4u, v);
              shown++;
-@@ -1379,7 +1655,7 @@ static void watch_report(void)
+@@ -1379,7 +1678,7 @@ static void watch_report(void)
              if (!peek_readable(slot))
                  break;
              fprintf(stderr, "         raw[esp+%-4u] %08X\n", i * 4u,
@@ -7672,7 +7714,7 @@ index 72d5131..bd971b1 100644
          }
      }
      fflush(stderr);
-@@ -1387,6 +1663,10 @@ static void watch_report(void)
+@@ -1387,6 +1686,10 @@ static void watch_report(void)
  
  static LONG CALLBACK watch_veh(PEXCEPTION_POINTERS ep)
  {
@@ -7683,7 +7725,7 @@ index 72d5131..bd971b1 100644
      DWORD code = ep->ExceptionRecord->ExceptionCode;
      DWORD old;
  
-@@ -1415,6 +1695,7 @@ static LONG CALLBACK watch_veh(PEXCEPTION_POINTERS ep)
+@@ -1415,6 +1718,7 @@ static LONG CALLBACK watch_veh(PEXCEPTION_POINTERS ep)
          }
      }
      return EXCEPTION_CONTINUE_SEARCH;
@@ -7691,7 +7733,7 @@ index 72d5131..bd971b1 100644
  }
  
  /* The target, which may be reached through pointers that do not exist yet.
-@@ -1437,7 +1718,7 @@ static int watch_resolve(uint32_t *out)
+@@ -1437,7 +1741,7 @@ static int watch_resolve(uint32_t *out)
      for (k = 0; k < g_watch_derefs; k++) {
          if (!peek_readable(a))
              return 0;
@@ -7700,7 +7742,7 @@ index 72d5131..bd971b1 100644
          if (!a)
              return 0;
      }
-@@ -1506,11 +1787,9 @@ static int watch_arm(uint32_t va)
+@@ -1506,11 +1810,9 @@ static int watch_arm(uint32_t va)
                          "not armed\n", g_watch_va);
          return 0;
      }
@@ -7714,7 +7756,7 @@ index 72d5131..bd971b1 100644
      g_watch_veh = AddVectoredExceptionHandler(1, watch_veh);
      if (!g_watch_veh
              || !VirtualProtect(g_watch_page, 4096, PAGE_READONLY, &old)) {
-@@ -1564,13 +1843,13 @@ void xbox_PeekSample(const char *label)
+@@ -1564,13 +1866,13 @@ void xbox_PeekSample(const char *label)
              end++;
          a = (uint32_t)va;
          for (k = 0; k < derefs && ok; k++) {
@@ -7730,7 +7772,7 @@ index 72d5131..bd971b1 100644
          else
              fprintf(stderr, " [%08X]=??", a);
          q = (*end == ',') ? end + 1 : end;
-@@ -1651,7 +1930,7 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
+@@ -1651,7 +1953,7 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
          uint32_t a = esp + i * 4;
          if (a < XBOX_STACK_BASE || a >= XBOX_STACK_TOP) break;
          fprintf(stderr, "    GS %08X %08X\n", a,
@@ -7739,7 +7781,7 @@ index 72d5131..bd971b1 100644
      }
      fflush(stderr);
      _exit(3);
-@@ -1704,6 +1983,10 @@ volatile uint32_t g_icall_trace[16] = {0};
+@@ -1704,6 +2006,10 @@ volatile uint32_t g_icall_trace[16] = {0};
  volatile uint32_t g_icall_trace_idx = 0;
  volatile uint64_t g_icall_count = 0;
  
@@ -7750,7 +7792,7 @@ index 72d5131..bd971b1 100644
  BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
  {
      g_force_return = getenv("RECOMP_FORCE_RETURN") != NULL;
-@@ -1739,6 +2022,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1739,6 +2045,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * With file mapping views, we create aliased mappings at 64 MB intervals
       * that all point to the same physical memory.
       */
@@ -7766,7 +7808,7 @@ index 72d5131..bd971b1 100644
      g_mapping_handle = CreateFileMappingA(
          INVALID_HANDLE_VALUE,   /* page file backed */
          NULL,                   /* default security */
-@@ -1790,7 +2082,35 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1790,7 +2105,35 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           * this on Windows needs placeholder reservations (VirtualAlloc2). */
  #ifndef _WIN32
          g_span_size = g_memory_size * (size_t)(1 + XBOX_NUM_MIRRORS);
@@ -7803,7 +7845,7 @@ index 72d5131..bd971b1 100644
          if (g_span_base) {
              VirtualFree(g_span_base, g_memory_size, MEM_RELEASE);
              g_memory_base = MapViewOfFileEx(g_mapping_handle,
-@@ -1826,6 +2146,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1826,6 +2169,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          }
      }
  
@@ -7811,7 +7853,7 @@ index 72d5131..bd971b1 100644
      if (!g_memory_base) {
          fprintf(stderr, "xbox_MemoryLayoutInit: failed to map base view (%zu KB)\n",
                  g_memory_size / 1024);
-@@ -1908,7 +2229,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1908,7 +2252,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * Helper macro: convert Xbox VA to actual mapped address.
       * When g_memory_offset == 0 (ideal case), this is identity.
       */
@@ -7820,7 +7862,7 @@ index 72d5131..bd971b1 100644
  
      /*
       * Copy XBE header to base address.
-@@ -2088,7 +2409,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2088,7 +2432,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
               * slots, and kernel.h notes 366 is short by 12. A title importing
               * a high ordinal would have had its table truncated here. */
              for (uint32_t t = 0; t < XBOX_KERNEL_THUNK_TABLE_SIZE; t++) {
@@ -7829,7 +7871,7 @@ index 72d5131..bd971b1 100644
                  if (entry == 0) break;
                  thunk_count++;
              }
-@@ -2143,7 +2464,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2143,7 +2487,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * We use free space in the BSS area for the fake structures.
       */
      {
@@ -7838,7 +7880,7 @@ index 72d5131..bd971b1 100644
          #define MEM32_INIT(va, val) (*(uint32_t *)XBOX_VA(va) = (uint32_t)(val))
  
          /* Fake TIB at address 0x0 */
-@@ -2274,6 +2595,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2274,6 +2618,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t contig_native = XBOX_CONTIG_BASE + g_memory_offset;
@@ -7849,7 +7891,7 @@ index 72d5131..bd971b1 100644
          g_contig_mapping = CreateFileMappingW(
              INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
              0, (DWORD)XBOX_CONTIG_SIZE, NULL);
-@@ -2288,6 +2613,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2288,6 +2636,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                  MEM_RESERVE | MEM_COMMIT,
                  PAGE_READWRITE
              );
@@ -7857,7 +7899,7 @@ index 72d5131..bd971b1 100644
          if (g_contig_memory) {
              fprintf(stderr, "  Contiguous window: %u MB at Xbox VA 0x%08X\n",
                      XBOX_CONTIG_SIZE / (1024 * 1024), XBOX_CONTIG_BASE);
-@@ -2319,12 +2645,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2319,12 +2668,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t nv2a_native = XBOX_NV2A_BASE + g_memory_offset;
@@ -7875,7 +7917,7 @@ index 72d5131..bd971b1 100644
          /* The pushbuffer survey rides on the same poll, so either
           * variable arms it. */
          s_nv2a_trace = getenv("RECOMP_NV2A_TRACE") != NULL
-@@ -2364,12 +2695,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2364,12 +2718,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t mcpx_native = XBOX_MCPX_BASE + g_memory_offset;
@@ -7893,7 +7935,7 @@ index 72d5131..bd971b1 100644
          g_mcpx_regs = g_mcpx_memory;
          if (g_mcpx_memory) {
              /* AC'97 codec ready.
-@@ -2425,9 +2761,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2425,9 +2784,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                   * memory keeps what the title writes. */
                  enum { APU_TRAP_BYTES = 0x00030000 };
                  DWORD old_protect;
@@ -7907,7 +7949,7 @@ index 72d5131..bd971b1 100644
                  if (g_apu_mmio_trapped)
                      fprintf(stderr, "  APU: 0x%08X..0x%08X trapped for MMIO"
                                      " (GP/EP DSP memory left as RAM)\n",
-@@ -2437,7 +2777,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2437,7 +2800,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                      |= MCPX_AC97_CODEC_READY;
                  /* Before the trap is armed: this write would otherwise be
                   * the first thing to fault. */
@@ -7918,7 +7960,7 @@ index 72d5131..bd971b1 100644
                  fprintf(stderr, "  AC97: codec reported ready at 0x%08X"
                                  " (DirectSound will initialise)\n",
                          XBOX_MCPX_BASE + MCPX_AC97_CODEC_STATUS);
-@@ -2456,12 +2798,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2456,12 +2821,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      {
          uintptr_t flash_native = XBOX_FLASH_BASE + g_memory_offset;
  
@@ -7936,7 +7978,7 @@ index 72d5131..bd971b1 100644
          if (g_flash_memory) {
              fprintf(stderr, "  Flash ROM aperture: %u MB at Xbox VA "
                      "0x%08X (zeroed, not a real BIOS image)\n",
-@@ -2494,7 +2841,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2494,7 +2864,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          /* Already committed if the contiguous window above succeeded -
           * 0x80010000 sits inside it - so just use that storage. */
          g_kernel_memory = g_contig_memory
@@ -7945,7 +7987,7 @@ index 72d5131..bd971b1 100644
              : VirtualAlloc((LPVOID)kernel_native, KERNEL_PAGE_SIZE,
                             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
          if (g_kernel_memory) {
-@@ -2532,6 +2879,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2532,6 +2902,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * intervals. All views alias the same physical pages, so reads and
       * writes at any mirror address correctly access the base data.
       */
@@ -7953,7 +7995,7 @@ index 72d5131..bd971b1 100644
      {
          int mirrors_ok = 0;
          /* The tiled aperture is a specific architectural alias -- physical RAM
-@@ -2644,11 +2992,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2644,11 +3015,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
               * startup line. */
              {
                  volatile uint32_t *via_tiled =
@@ -7967,7 +8009,7 @@ index 72d5131..bd971b1 100644
                  uint32_t saved = *via_contig;
  
                  *via_tiled = 0xA5C30F17u;
-@@ -2674,6 +3020,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2674,6 +3043,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          }
      }
  
@@ -7975,7 +8017,7 @@ index 72d5131..bd971b1 100644
      xbox_WatchInit();
      fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
      return TRUE;
-@@ -2834,6 +3181,26 @@ ptrdiff_t xbox_GetMemoryOffset(void)
+@@ -2834,6 +3204,26 @@ ptrdiff_t xbox_GetMemoryOffset(void)
      return g_memory_offset;
  }
  
@@ -8002,7 +8044,7 @@ index 72d5131..bd971b1 100644
  /* ── Dynamic heap allocator ────────────────────────────────
   *
   * Simple bump allocator for MmAllocateContiguousMemory and similar.
-@@ -2916,7 +3283,7 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
+@@ -2916,7 +3306,7 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
          g_heap_blocks[i].free = 0;
          if (back && !heap_insert_free(i + 1, start + size, back))
              g_heap_blocks[i].size += back;   /* table full: keep it attached */
@@ -8011,7 +8053,7 @@ index 72d5131..bd971b1 100644
          return start;
      }
      return 0;
-@@ -2957,7 +3324,7 @@ static int g_thread_stacks_used = 0;
+@@ -2957,7 +3347,7 @@ static int g_thread_stacks_used = 0;
  uint32_t xbox_AllocThreadTib(void)
  {
      /* XBOX_VA is scoped to the loader; the same arithmetic, spelled here. */
@@ -8020,7 +8062,7 @@ index 72d5131..bd971b1 100644
      const uint32_t tib_size = 0x40;
      uint32_t tib, block, thread_data, total;
  
-@@ -3153,7 +3520,7 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
+@@ -3153,7 +3543,7 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
      if (reclaim)
          ReleaseSRWLockExclusive(&g_contig_lock);
  
@@ -8029,7 +8071,7 @@ index 72d5131..bd971b1 100644
      return result;
  }
  
-@@ -3267,7 +3634,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+@@ -3267,7 +3657,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
              }
              g_heap_blocks[i].free = 0;
              result = g_heap_blocks[i].addr;
@@ -8038,7 +8080,7 @@ index 72d5131..bd971b1 100644
              return result;
          }
      }
-@@ -3313,7 +3680,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+@@ -3313,7 +3703,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
      g_heap_next = result + size;
  
      /* Zero-fill the allocated block (Xbox memory is always zeroed) */
@@ -8047,6 +8089,7 @@ index 72d5131..bd971b1 100644
  
      if (g_heap_block_count < XBOX_HEAP_MAX_BLOCKS) {
          g_heap_blocks[g_heap_block_count].addr = result;
+
 diff --git a/src/kernel/xbox_memory_layout.h b/src/kernel/xbox_memory_layout.h
 index 53f9d3d..f826168 100644
 --- a/src/kernel/xbox_memory_layout.h
@@ -8166,18 +8209,55 @@ index 93288d5..1d1c9e4 100644
      struct sysinfo si;
      if (sysinfo(&si) != 0) return FALSE;
 diff --git a/src/platform/win32_compat.h b/src/platform/win32_compat.h
-index 22762ee..4c1a32c 100644
+index 22762ee..c6f9427 100644
 --- a/src/platform/win32_compat.h
 +++ b/src/platform/win32_compat.h
-@@ -168,6 +168,7 @@ DWORD  GetCurrentProcessId(void);
+@@ -128,6 +128,30 @@ HANDLE      w32_open_handle(int fd, const char *host_path);
+ int         w32_handle_fd(HANDLE h);
+ const char *w32_handle_path(HANDLE h);
+ 
++/* A read-only image can supply files that are not on the host filesystem
++ * (kernel_iso.c mounts a disc carried inside the APK). The kernel registers
++ * the reader; this layer only keeps the handle shape, so the file layer has
++ * one kind of file handle whether the bytes are local or in the image. */
++struct stat;    /* file-scope tag: a prototype's own scope would be a different type */
++
++typedef struct {
++    int       (*open)(const char *host_path);   /* >=0 file, -2 directory, -1 absent */
++    long long (*read)(int file, void *buf, long long n, long long off);
++    long long (*size)(int file);
++    void      (*close)(int file);
++} w32_disc_backend;
++
++void   w32_set_disc_backend(const w32_disc_backend *backend);
++HANDLE w32_open_disc(const char *host_path);    /* NULL when not in the image */
++int    w32_handle_is_file(HANDLE h);            /* real file or image file */
++int    w32_handle_is_disc(HANDLE h);
++
++ssize_t   w32_file_read(HANDLE h, void *buf, size_t len);
++ssize_t   w32_file_write(HANDLE h, const void *buf, size_t len);
++int64_t   w32_file_seek(HANDLE h, int64_t off, int whence);
++uint64_t  w32_file_size(HANDLE h);
++int       w32_file_stat(HANDLE h, struct stat *st);
++
+ /* ---- Events ----------------------------------------------------------- */
+ HANDLE CreateEventA(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCSTR name);
+ HANDLE CreateEventW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCWSTR name);
+@@ -168,6 +192,13 @@ DWORD  GetCurrentProcessId(void);
  BOOL   SetThreadPriority(HANDLE h, int priority);
  int    GetThreadPriority(HANDLE h);
  VOID   SwitchToThread(void);
++/* sched_yield, not the pause instruction: a busy spin here measured 49.0 FPS
++ * against 55.0 for the yield on the phone, at the same 480p settings. The
++ * cost is real (16% of the process's CPU sits in this call) but a spin pays
++ * for it in power and cluster contention. Waking this thread from the
++ * register write that needs it is the fix that would not trade one for the
++ * other. */
 +#define YieldProcessor() sched_yield()
  DWORD  QueueUserAPC(PAPCFUNC func, HANDLE thread, ULONG_PTR data);
  
  /* ---- Sleep ------------------------------------------------------------ */
-@@ -228,6 +229,7 @@ unsigned int _clearfp(void);   /* clear pending FPU exception flags */
+@@ -228,6 +259,7 @@ unsigned int _clearfp(void);   /* clear pending FPU exception flags */
  
  /* MSVC stack alloca alias. <alloca.h> provides the underlying function. */
  #include <alloca.h>
@@ -8185,7 +8265,7 @@ index 22762ee..4c1a32c 100644
  #define _alloca(n) alloca(n)
  
  /* ---- Win32 file API (POSIX-backed) ----------------------------------- */
-@@ -438,7 +440,7 @@ VOID RaiseException(DWORD code, DWORD flags, DWORD nargs, const ULONG_PTR *args)
+@@ -438,7 +470,7 @@ VOID RaiseException(DWORD code, DWORD flags, DWORD nargs, const ULONG_PTR *args)
   * 
   * Note: GCC needs correct struct. This is from nxdk
   * */
@@ -8194,6 +8274,7 @@ index 22762ee..4c1a32c 100644
  typedef struct _EXCEPTION_POINTERS
  {
      PEXCEPTION_RECORD ExceptionRecord;
+
 diff --git a/src/usb/ohci.c b/src/usb/ohci.c
 index 641a94d..63bec1f 100644
 --- a/src/usb/ohci.c
