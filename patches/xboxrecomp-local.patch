@@ -10893,7 +10893,7 @@ index 0000000..8891786
 +#endif
 diff --git a/src/video/touch_pad.c b/src/video/touch_pad.c
 new file mode 100644
-index 0000000..9567013
+index 0000000..9fedfe4
 --- /dev/null
 +++ b/src/video/touch_pad.c
 @@ -0,0 +1,1068 @@
@@ -11044,7 +11044,7 @@ index 0000000..9567013
 +    memset(c, 0, sizeof(control) * CONTROL_COUNT);
 +
 +    /* Sticks first. The right stick has no resting place: it appears where the
-+     * camera finger lands. */
++     * board-press finger lands. */
 +    c[n++] = (control){ KIND_STICK, tx, 0.60f * h, 0.105f * h, BTN_NONE, 0, "L", kLabel };
 +    c[n++] = (control){ KIND_STICK, w * 0.75f, 0.60f * h, 0.095f * h, BTN_NONE, 1, "R", kLabel };
 +
