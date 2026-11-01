@@ -39,13 +39,29 @@ re-importing the same image later keeps your saves.
 Releases are signed with the same key every time (the one committed in
 `android/ssx3-debug.keystore`), so a newer APK installs over an older one and keeps the data.
 
+## On-screen controls
+
+![On-screen controls during a race](docs/screenshots/33-android-touch-controls.jpg)
+
+| Control | In SSX 3 |
+|---|---|
+| **L** / **R** (one large trigger each side) | R grabs; L tweaks a held grab, and shoves on the ground |
+| **D-pad** | steer, and late spins/flips in the air; the diagonals work, as they do on the pad |
+| **X Y B A** | the face buttons, in the Xbox 360 letter colours; the diamond is one zone, so a thumb planted between Y and B presses both, and a thumb rolled across it keeps what it covers |
+| **HAND** | handstand — what the pad's White and Black buttons both do |
+| **BACK** / **START** | back, pause |
+| **sticks** | not drawn at rest: any touch on empty screen space is that half's stick, and the ring appears under your thumb. The left half is the board stick, the right half the camera |
+
+A **real controller** works too: connect one over Bluetooth or USB and the game reads it as pad 0,
+exactly like the touch pad, with the on-screen controls hidden while it is connected.
+
 ## What this fork adds
 
 | | |
 |---|---|
 | **An Android build.** | `android/` packages the port with the NDK and **no Gradle**: aapt2, javac, d8, zipalign, apksigner. arm64-v8a, minSdk 30, `libmain.so` + `libSDL2.so`, Vulkan through the phone's own driver. |
 | **It boots on a phone.** | The guest's 4 GB are reserved at a low base, because Android hands out 39-bit user addresses and refuses the fixed mappings a desktop takes for granted; the framebuffer is presented through SDL after SDL_main owns the window and the game runs on its own thread; storage is rooted in the app's own folder, which needs no permission; everything the game prints goes to logcat. |
-| **On-screen controls.** | An Xbox pad drawn over the frame — floating left stick, D-pad, the ABXY diamond with its letter colours, the shoulder cluster, BACK/START — reported as pad 0 through the same XID report a physical controller uses, so the game reads it exactly like real hardware. The layout, colours and hit rules are [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid)'s gamepad overlay ported line for line (see [Inspiration](#inspiration)), including its rule that the pad **disappears while a real controller is connected**. Its L3/R3 buttons are left out: SSX 3 binds nothing to a stick click. `RECOMP_TOUCH_PAD=0` turns it off; `RECOMP_TOUCH_TRACE=1` logs what each touch hit. |
+| **On-screen controls.** | An Xbox pad drawn over the frame — one large trigger per side, the ABXY diamond with its letter colours, a D-pad, a HAND button and BACK/START — reported as pad 0 through the same XID report a physical controller uses, so the game reads it exactly like real hardware. The face diamond and the D-pad are zones rather than four circles each, so one thumb can hold two buttons at once; the sticks have no resting ring and appear under the thumb wherever empty screen space is touched. The layout, colours and hit rules started from [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid)'s gamepad overlay (see [Inspiration](#inspiration)), including its rule that the pad **disappears while a real controller is connected**. Sticks clicks (L3/R3) are left out: SSX 3 binds nothing to them. `RECOMP_TOUCH_PAD=0` turns it off; `RECOMP_TOUCH_TRACE=1` logs what each touch hit. |
 | **Saving, loading and deleting on POSIX.** | The toolkit's file layer resolved only absolute names. A title deletes a save by opening each file *through the save folder's handle*, so on Android every delete failed while the files stayed on disk — the Windows backend had handled it from the start. Also: directory scans restart when a pattern is supplied, free their slot on close, and match with a portable glob (`fnmatch(..., FNM_CASEFOLD)` treats `*.*` literally). |
 | **Audio that keeps up.** | Throttle debt drains at a bounded rate instead of one lump after a stall, the audio thread runs at audio priority, the voice lock is taken only when a voice changes: 188 buffers/s (48 kHz), 0 underruns. |
 | **Disc image import.** | `src/android/xiso.c` reads an XDVDFS image **in place** through the file picker's descriptor — no 2 GB temporary copy — finds the volume descriptor in either the trimmed (`0x10000`) or redump (`0x18300000`) layout, fingerprints `default.xbe` against the PAL disc so a different region is refused *before* extracting 2 GB, and extracts the tree. Byte-exact tests in `tests/xiso/run.sh`. |

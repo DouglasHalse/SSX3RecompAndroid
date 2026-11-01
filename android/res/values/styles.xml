@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="AppTheme" parent="android:Theme.NoTitleBar.Fullscreen">
+        <!-- Laid out under the display cutout: the window is otherwise inset by
+             the notch, so a control placed symmetrically inside the surface lands
+             off-centre on the panel. -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
 </resources>
