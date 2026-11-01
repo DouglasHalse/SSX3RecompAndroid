@@ -48,7 +48,7 @@ Releases are signed with the same key every time (the one committed in
 | **L** / **R** (one large trigger each side) | R grabs; L tweaks a held grab, and shoves on the ground |
 | **D-pad** | steer, and late spins/flips in the air; the diagonals work, as they do on the pad |
 | **X Y B A** | the face buttons, in the Xbox 360 letter colours; the diamond is one zone, so a thumb planted between Y and B presses both, and a thumb rolled across it keeps what it covers |
-| **HAND** | handstand — what the pad's White and Black buttons both do |
+| **HAND** | a hand plant, or hand spring — this is what the pad's White and Black buttons both do |
 | **BACK** / **START** | back, pause |
 | **sticks** | not drawn at rest: any touch on empty screen space is that half's stick, and the ring appears under your thumb. The left half is the board stick, the right half the camera |
 

@@ -10893,10 +10893,10 @@ index 0000000..8891786
 +#endif
 diff --git a/src/video/touch_pad.c b/src/video/touch_pad.c
 new file mode 100644
-index 0000000..cf960a6
+index 0000000..9567013
 --- /dev/null
 +++ b/src/video/touch_pad.c
-@@ -0,0 +1,1066 @@
+@@ -0,0 +1,1068 @@
 +/* On-screen controls for Android -- see touch_pad.h.
 + *
 + * A port of the "gamepad" touch overlay from LibertyRecompAndroid
@@ -11187,6 +11187,7 @@ index 0000000..cf960a6
 +    static const unsigned char E[7] = { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F };
 +    static const unsigned char K[7] = { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 };
 +    static const unsigned char L[7] = { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F };
++    static const unsigned char P[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 };
 +    static const unsigned char R[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 };
 +    static const unsigned char S[7] = { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E };
 +    static const unsigned char T[7] = { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 };
@@ -11209,6 +11210,7 @@ index 0000000..cf960a6
 +        case 'K': return K;
 +        case 'L': return L;
 +        case 'N': return N;
++        case 'P': return P;
 +        case 'R': return R;
 +        case 'S': return S;
 +        case 'T': return T;
@@ -11963,6 +11965,7 @@ index 0000000..cf960a6
 +}
 +
 +#endif /* __ANDROID__ */
+
 diff --git a/src/video/touch_pad.h b/src/video/touch_pad.h
 new file mode 100644
 index 0000000..9eae157
