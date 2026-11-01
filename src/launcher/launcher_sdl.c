@@ -39,6 +39,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "build_info.h"           /* SSX3_BUILD_COMMIT: v0.2.4, or a commit */
+
 extern char **environ;
 
 #define GAME_EXE   "ssx3_recomp"
@@ -325,6 +327,27 @@ static void save_settings(void)
     ini_set_int("money_cheat", s_moneycheat);
     ini_set_int("log_level", s_loglevel);
     ini_save();
+}
+
+/* "Reset to defaults": every option as on a first start (the defaults of
+ * load_settings); the game folder stays. */
+static void reset_settings(void)
+{
+    s_res = 0;
+    s_aspect = 0;
+    s_msaa = 2;
+    s_aniso = 3;
+    s_drawdist = 1;
+    s_shadows = 1;
+    s_crt = 0;
+    s_hdtex = 1;
+    s_hudedges = 1;
+    s_skipintro = 1;
+    s_fastboot = 1;
+    s_debugmenu = 0;
+    s_moneycheat = 0;
+    s_loglevel = 2;
+    save_settings();
 }
 
 /* ---- helpers that run other programs ----------------------------------- */
@@ -881,7 +904,7 @@ static int draw_form(int *want_play)
     SDL_RenderClear(s_ren);
 
     text(s_title, "SSX 3", L, y, C_TEXT, 0, 0);
-    text(s_font, "static recompilation for Linux", L + text_w(s_title, "SSX 3") + 12,
+    text(s_font, "static recompilation for Linux   " SSX3_BUILD_COMMIT, L + text_w(s_title, "SSX 3") + 12,
          y + font_h(s_title) - font_h(s_font) - 4, C_DIM, 0, 0);
     y += font_h(s_title) + 14;
 
@@ -954,6 +977,8 @@ static int draw_form(int *want_play)
 
     if (button(L, y, 110, 32, "Open logs", 0, 1))
         open_logs();
+    if (button(L + 120, y, 150, 32, "Reset to defaults", 0, 1))
+        reset_settings();
     if (button(WIN_W - L - 130, y, 130, 32, "Play", 1, s_game_ok) && s_game_ok)
         *want_play = 1;
     y += 32 + 18;

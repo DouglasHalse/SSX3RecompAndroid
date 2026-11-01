@@ -63,8 +63,10 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "src/recomp/gen/*.c")
 set(GAME_SOURCES
     src/main.c
     src/log.c
+    src/prof.c
     src/journal.c
     src/mark.c
+    src/live.c
     src/perf.c
     src/recomp_manual.c
     src/ssx3_overrides.c
@@ -151,6 +153,13 @@ if(WIN32)
 elseif(ANDROID)
     # libmain.so carries the game; SDL2 and Vulkan are its only outside deps.
     target_link_libraries(${PROJECT_NAME} PRIVATE m log android dl)
+    # The guest's registers are thread-locals that every recompiled instruction
+    # touches through RECOMP_TLS, and general-dynamic puts __tls_get_addr in
+    # linker64 on that path (11% of the guest thread's samples). Trying
+    # -ftls-model=initial-exec does not work: bionic refuses IE relocations in a
+    # dlopened library ("TLS symbol \"g_mm0\" ... using IE access model") and the
+    # app dies in System.loadLibrary. Removing the call needs the registers out
+    # of TLS, not a different TLS model.
 elseif(EMSCRIPTEN)
     # main() runs on a worker (PROXY_TO_PTHREAD): guest code blocks freely and
     # the browser thread stays free for input, audio and presenting. Guest
@@ -242,7 +251,9 @@ if(ANDROID)
 elseif(WIN32)
     add_executable(ssx3_launcher WIN32 src/launcher/launcher.c)
     set_target_properties(ssx3_launcher PROPERTIES OUTPUT_NAME launcher)
-    target_link_libraries(ssx3_launcher PRIVATE comctl32 ole32 shell32 xinput)
+    target_link_libraries(ssx3_launcher PRIVATE comctl32 ole32 shell32 xinput winhttp)
+    target_include_directories(ssx3_launcher PRIVATE ${CMAKE_BINARY_DIR})   # build_info.h
+    add_dependencies(ssx3_launcher ssx3_build_info)
 else()
     # The same launcher on SDL2 (src/launcher/launcher_sdl.c): text through
     # SDL2_ttf in the desktop's font (fontconfig). Optional: without them
@@ -255,6 +266,8 @@ else()
         set_target_properties(ssx3_launcher PROPERTIES OUTPUT_NAME launcher)
         target_link_libraries(ssx3_launcher PRIVATE SDL2::SDL2 SDL2_ttf::SDL2_ttf
                               Fontconfig::Fontconfig)
+        target_include_directories(ssx3_launcher PRIVATE ${CMAKE_BINARY_DIR})   # build_info.h
+        add_dependencies(ssx3_launcher ssx3_build_info)
     else()
         message(STATUS "launcher: SDL2_ttf or fontconfig not found, not built")
     endif()

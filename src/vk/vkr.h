@@ -95,6 +95,9 @@ VkrTex *vkr_tex_create_bc7(VkrContext *c, uint64_t key, uint32_t w, uint32_t h,
                            uint32_t mips, const void *data, size_t size, uint32_t flags);
 uint32_t vkr_tex_flags(const VkrTex *t);
 uint32_t vkr_tex_generation(VkrContext *c);   /* changes when all textures were freed */
+void     vkr_tex_purge(VkrContext *c);          /* free every texture at the next flip */
+/* the main target's size and MSAA samples, the texture cache's bytes */
+void     vkr_info(VkrContext *c, uint32_t *w, uint32_t *h, uint32_t *msaa, uint64_t *tex_bytes);
 
 /* Draw an indexed triangle, line or point list (st->topology). */
 int vkr_draw(VkrContext *c, const VkrVertex *v, uint32_t nverts,

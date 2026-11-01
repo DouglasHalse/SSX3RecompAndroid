@@ -19,6 +19,9 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- The update check on the launcher's stamp line reads GitHub's latest
+         release; nothing else in the app touches the network. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- Optional: lets the game read the rip from /sdcard/Download/ssx3 (the
          only place a file manager or adb can write on a retail phone). Grant
          it in Settings > Apps > SSX 3 > Special access > All files access. -->

@@ -39,6 +39,13 @@ public class LauncherActivity extends Activity {
 
     private static final String REPO_URL = "https://github.com/DouglasHalse/SSX3RecompAndroid";
 
+    private static final String LATEST_API =
+            "https://api.github.com/repos/DouglasHalse/SSX3RecompAndroid/releases/latest";
+
+    private TextView buildLine;      // version + toolkit, with the update state after it
+    private String buildBase = "";
+    private String updateUrl = null; // set when there is a newer release to open
+
     private TextView status;     // one line: ready or not
     private TextView detail;     // what was found / what went wrong
     private ProgressBar bar;
@@ -163,16 +170,29 @@ public class LauncherActivity extends Activity {
         });
         root.addView(sub);
 
-        /* Stamped in by android/build_apk.sh. */
+        /* Stamped in by android/build_apk.sh. A release tag already names one game
+         * commit and one toolkit commit, so the hash would be detail a player cannot
+         * act on; a dev build has no tag to look up. */
         TextView build = new TextView(this);
         String toolkit = BuildInfo.TOOLKIT.isEmpty()
                 ? "" : " + toolkit " + BuildInfo.TOOLKIT;
         build.setText(BuildInfo.RELEASE
-                ? "Version " + BuildInfo.VERSION + toolkit
+                ? "Version " + BuildInfo.VERSION
                 : "Build " + BuildInfo.COMMIT + toolkit + " \u00b7 " + BuildInfo.DATE);
         build.setTextSize(12);
         build.setTextColor(0xFF5E7183);
         build.setPadding(0, pad / 6, 0, 0);
+        buildBase = build.getText().toString();
+        buildLine = build;
+        build.setOnClickListener(new android.view.View.OnClickListener() {
+            @Override
+            public void onClick(android.view.View v) {
+                if (updateUrl != null)
+                    openUrl(updateUrl);
+                else
+                    checkForUpdate();
+            }
+        });
         root.addView(build);
 
         status = new TextView(this);
@@ -236,7 +256,107 @@ public class LauncherActivity extends Activity {
         scroll.addView(root, new android.widget.FrameLayout.LayoutParams(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
+        checkForUpdate();
         return scroll;
+    }
+
+    private void openUrl(String url) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception e) {
+            status.setText("No browser to open " + url);
+        }
+    }
+
+    /* One request per launch: GitHub's latest release against this build, shown
+     * as a coloured tail on the stamp line so a player who never opens a browser
+     * still learns the build is old. Tapping the line retries, or opens it. */
+    private void checkForUpdate() {
+        if (buildLine == null)
+            return;
+        setUpdate("checking…", 0xFF5E7183, null);
+        final String mine = BuildInfo.VERSION;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String tag = "", page = "";
+                java.net.HttpURLConnection c = null;
+                try {
+                    c = (java.net.HttpURLConnection) new java.net.URL(LATEST_API).openConnection();
+                    c.setConnectTimeout(6000);
+                    c.setReadTimeout(6000);
+                    c.setRequestProperty("Accept", "application/vnd.github+json");
+                    c.setRequestProperty("User-Agent", "SSX3RecompAndroid/" + mine);
+                    if (c.getResponseCode() == 200) {
+                        java.io.BufferedReader r = new java.io.BufferedReader(
+                                new java.io.InputStreamReader(c.getInputStream(), "UTF-8"));
+                        StringBuilder b = new StringBuilder();
+                        for (String line; (line = r.readLine()) != null; )
+                            b.append(line);
+                        r.close();
+                        org.json.JSONObject j = new org.json.JSONObject(b.toString());
+                        tag = j.optString("tag_name", "");
+                        page = j.optString("html_url", "");
+                    }
+                } catch (Exception e) {
+                    /* offline, no route, rate limited: the line says so */
+                } finally {
+                    if (c != null)
+                        c.disconnect();
+                }
+                final String latestTag = tag, releasePage = page;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        showUpdate(mine, latestTag, releasePage);
+                    }
+                });
+            }
+        }, "update-check").start();
+    }
+
+    private void showUpdate(String mine, String tag, String page) {
+        String latest = tag != null && tag.startsWith("android-v")
+                ? tag.substring("android-v".length()) : "";
+        if (latest.isEmpty()) {
+            setUpdate("update check failed", 0xFF8A97A6, null);
+            return;
+        }
+        if (compareVersions(latest, mine) <= 0) {
+            setUpdate("up to date", 0xFF7FBF8F, null);
+        } else {
+            setUpdate("update " + latest + " available", 0xFFE8B341,
+                      page != null && page.startsWith("http") ? page : REPO_URL + "/releases/latest");
+        }
+    }
+
+    private void setUpdate(String text, int colour, String url) {
+        android.text.SpannableString s =
+                new android.text.SpannableString(buildBase + "  ·  " + text);
+        s.setSpan(new android.text.style.ForegroundColorSpan(colour), buildBase.length(),
+                  s.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        buildLine.setText(s);
+        updateUrl = url;
+    }
+
+    /* 0.1.10 sorts above 0.1.9; a dev build compares by its numeric part. */
+    private static int compareVersions(String a, String b) {
+        String[] x = a.split("[-.+_]"), y = b.split("[-.+_]");
+        for (int i = 0; i < Math.max(x.length, y.length); i++) {
+            int xi = i < x.length ? piece(x[i]) : 0;
+            int yi = i < y.length ? piece(y[i]) : 0;
+            if (xi != yi)
+                return xi < yi ? -1 : 1;
+        }
+        return 0;
+    }
+
+    private static int piece(String s) {
+        try {
+            return Integer.parseInt(s);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /** <root>/recomp.cfg, so the game starts with what the settings screen says. */

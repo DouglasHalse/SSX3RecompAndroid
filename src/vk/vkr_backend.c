@@ -1823,10 +1823,51 @@ static float vsh_first_w(const float *in, const Nv2aVshProgram *p, float *z)
     return o.pos[3];
 }
 
+/* Live settings (src/live.c, keys F4/F6): HD textures on/off (the cache
+ * is emptied so every texture is made again with or without its
+ * replacement) and rider shadows off (draws into the shadow maps are
+ * dropped: the maps stay cleared, i.e. transparent, and nothing shows). */
+static volatile int s_no_shadows;
+
+int ssx3_LiveHdTextures(int on)
+{
+    hdtex_request(on);
+    if (s_vk)
+        vkr_tex_purge(s_vk);
+    return on;
+}
+
+int ssx3_LiveHdTexturesOn(void)
+{
+    return hdtex_enabled();
+}
+
+void ssx3_LiveShadows(int on)
+{
+    s_no_shadows = !on;
+}
+
+int ssx3_LiveShadowsOn(void)
+{
+    return !s_no_shadows;
+}
+
+/* for the player mark's state line: 0 without a renderer */
+int ssx3_RenderInfo(uint32_t *w, uint32_t *h, uint32_t *msaa, uint64_t *tex_bytes)
+{
+    if (!s_vk)
+        return 0;
+    vkr_info(s_vk, w, h, msaa, tex_bytes);
+    return 1;
+}
+
 static int be_draw(const Nv2aTarget *t, uint32_t prim, const Nv2aVshOutput *v, uint32_t n)
 {
     uint32_t *idx, k = 0, topo;
     int offscreen;
+
+    if (s_no_shadows && t->swizzled)
+        return 1;                       /* a rider shadow map's caster */
 
     double td = 0;
     if (s_stats < 0) s_stats = getenv("RECOMP_VKR_STATS") != NULL;

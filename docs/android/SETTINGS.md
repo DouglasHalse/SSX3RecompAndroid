@@ -43,6 +43,10 @@ one-off).
 | Money cheat | Off / On | `RECOMP_MONEY_CHEAT` |
 | Log detail | Errors … Everything | `RECOMP_LOG_LEVEL` |
 
+The launcher's own Settings screen still writes `recomp.cfg`, and its
+*Render resolution* row now offers the same choice as three values: the
+panel's short side, 720p, or the original 480.
+
 Each row writes the variable in its own grammar: `RECOMP_HDTEX` takes a
 directory name (`hd-textures`, or `0` for off), `RECOMP_MBLUR` a strength
 (`0.5`), `RECOMP_FAST_BOOT` the multiplier the front end's fixed pauses run at

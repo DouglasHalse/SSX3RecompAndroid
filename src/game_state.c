@@ -67,15 +67,19 @@ static const struct { int peak; const char *kind, *name; } k_events[17] = {
     {1, "Peak run", "Happiness"}, {2, "Peak run", "Ruthless"}, {3, "Peak run", "The Throne"},
 };
 
-/* entering an event -> its briefing screen: the load time (C7) */
-static volatile DWORD s_enter_ms;
+/* entering an event -> its briefing screen: the load time (C7). Only a
+ * briefing soon after the game comes into "in game" ends a load; one that
+ * follows riding around first (Conquer the Mountain: a free start, then
+ * riding into an event's gate) is not a load. */
+static volatile DWORD s_enter_ms, s_ingame_ms;
 
 void ssx3_EventReady(void)
 {
     DWORD t = s_enter_ms;
     if (t) {
         s_enter_ms = 0;
-        log_msg(LOG_INFO, "PLAY", "event loaded in %.1f s", (GetTickCount() - t) / 1000.0);
+        if (GetTickCount() - s_ingame_ms < 20000)
+            log_msg(LOG_INFO, "PLAY", "event loaded in %.1f s", (GetTickCount() - t) / 1000.0);
     }
 }
 
@@ -245,8 +249,10 @@ static DWORD WINAPI game_state_thread(LPVOID unused)
              * first): its load starts */
             if ((vt == 0x0029AD48u || vt == 0x0029B0DCu) && !s_enter_ms)
                 s_enter_ms = now ? now : 1;
-            if (vt == 0x00299D7Cu)        /* in game: which event */
+            if (vt == 0x00299D7Cu) {      /* in game: which event */
+                s_ingame_ms = now;
                 event_note();
+            }
         }
         if (vt != last_vt || next != last_next || sub != last_sub) {
             if (vt != last_vt || sub != last_sub)

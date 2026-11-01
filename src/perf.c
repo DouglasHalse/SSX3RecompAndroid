@@ -154,6 +154,22 @@ static void span_say(int level, const char *what, const Span *s)
             s->total_ms / 1000.0);
 }
 
+static volatile float s_fps_last;       /* frames in the last whole second */
+
+float ssx3_PerfLastFps(void)
+{
+    return s_fps_last;
+}
+
+/* "132 s into Gravitude", or "" outside an event */
+void ssx3_PerfEventTime(char *out, size_t n)
+{
+    if (s_event_name[0] && s_event_t0 > 0)
+        snprintf(out, n, "%.0f s into %s", (now_ms() - s_event_t0) / 1000.0, s_event_name);
+    else if (n)
+        out[0] = 0;
+}
+
 void ssx3_PerfEvent(const char *name)
 {
     if (name) {
@@ -193,6 +209,18 @@ void ssx3_PerfFlip(void)
     }
     if (dt <= 0)
         return;
+    {
+        static unsigned frames;
+        static double t0;
+        if (!t0)
+            t0 = t;
+        frames++;
+        if (t - t0 >= 1000.0) {
+            s_fps_last = (float)(frames * 1000.0 / (t - t0));
+            frames = 0;
+            t0 = t;
+        }
+    }
     span_add(&s_minute, dt);
     if (s_event_name[0] && t - s_event_t0 < SETTLE_MS)
         return;

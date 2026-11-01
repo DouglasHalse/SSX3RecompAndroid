@@ -54,8 +54,15 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && {
 }
 # Bump the version in one place and the release notes can quote it.
 COMMIT=$(git rev-parse --short HEAD)
-TOOLKIT_COMMIT=$( (cd "$ROOT/../xboxrecomp" && git rev-parse --short HEAD) 2>/dev/null || echo unknown )
-VERSION_CODE=$(git rev-list --count HEAD)
+# The toolkit the build compiles is the one the build cache points at: ../xboxrecomp
+# can be a different checkout, and then the stamp names code this APK does not carry.
+TOOLKIT_DIR=${TOOLKIT_DIR:-$(sed -n 's/^XBOXRECOMP_DIR:[A-Z]*=//p' build-android/CMakeCache.txt 2>/dev/null | head -1)}
+TOOLKIT_DIR=${TOOLKIT_DIR:-$ROOT/../xboxrecomp}
+TOOLKIT_COMMIT=$( (cd "$TOOLKIT_DIR" && git rev-parse --short HEAD) 2>/dev/null || echo unknown )
+# A commit count dips whenever history is squashed or a build is tried on a
+# branch ahead of main, and Android refuses an update whose code is lower than
+# what the device runs. The date only moves forward.
+VERSION_CODE=${VERSION_CODE:-$(date +%y%m%d)}
 
 # The changelog reads from the previous release: this repo since its tag, the
 # toolkit since the commit that release was built with. The tag annotation
@@ -73,8 +80,11 @@ fi
 
 say "building the APK for $TAG (commit $COMMIT, version code $VERSION_CODE)"
 cmake --build build-android --target ssx3_recomp ssx3import --parallel 16 >/dev/null
+# The toolkit stamp has to name the tree this build compiled: the build cache
+# knows it, and build_apk.sh's default (../xboxrecomp) can be another checkout.
+TOOLKIT_DIR=${TOOLKIT_DIR:-$(sed -n 's/^XBOXRECOMP_DIR:[A-Z]*=//p' build-android/CMakeCache.txt 2>/dev/null | head -1)}
 RELEASE=1 VERSION_NAME="$VERSION" VERSION_CODE="$VERSION_CODE" COMMIT="$COMMIT" \
-    OUT=build/release APK_NAME="ssx3-android-$VERSION.apk" \
+    OUT=build/release APK_NAME="ssx3-android-$VERSION.apk" TOOLKIT_DIR="$TOOLKIT_DIR" \
     bash android/build_apk.sh | tail -4
 
 APK="build/release/ssx3-android-$VERSION.apk"

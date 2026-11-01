@@ -36,6 +36,8 @@
 #include "vkr_hdtex.h"
 
 static int s_init;
+static int s_off;                       /* replacements switched off */
+static volatile int s_want = -1;        /* hdtex_request: 1 on, 0 off, -1 none */
 static char s_dump_dir[512];
 static char s_hd_dir[512];
 
@@ -165,8 +167,10 @@ static void init(void)
         fprintf(stderr, "[HDTEX] dumping textures to %s\n", s_dump_dir);
     }
     e = getenv("RECOMP_HDTEX");
-    if (e && *e == '0' && !e[1])
+    if (e && *e == '0' && !e[1]) {
+        s_off = 1;                     /* hdtex_request(1) can still load it */
         return;
+    }
     if (e && *e)
         snprintf(s_hd_dir, sizeof s_hd_dir, "%s", e);
     else
@@ -174,10 +178,33 @@ static void init(void)
     load_map(s_hd_dir);
 }
 
+/* On/off while the game runs (a key, live.c): asked from any thread, done
+ * here on the render thread, which is the only one using the map. */
+void hdtex_request(int on)
+{
+    s_want = on ? 1 : 0;
+}
+
+int hdtex_enabled(void)
+{
+    int w = s_want;
+    return w >= 0 ? w : !s_off && s_nmap > 0;
+}
+
 int hdtex_active(void)
 {
+    int w;
     init();
-    return s_dump_dir[0] || s_nmap;
+    if ((w = s_want) >= 0) {
+        s_want = -1;
+        s_off = !w;
+        if (w && !s_nmap) {            /* off at start: find and load the pack now */
+            if (!s_hd_dir[0])
+                default_dir(s_hd_dir, sizeof s_hd_dir);
+            load_map(s_hd_dir);
+        }
+    }
+    return s_dump_dir[0] || (s_nmap && !s_off);
 }
 
 uint64_t hdtex_key(const uint32_t *px, uint32_t w, uint32_t h)

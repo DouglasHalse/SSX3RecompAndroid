@@ -900,6 +900,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     ssx3_SettingsLoad();
     ssx3_SettingsPageInstall();
 
+    {   /* RECOMP_PROFILE=<path>: where the guest's own time goes (prof.c).
+         * The phone's kernel offers no perf events, so the sampler lives here. */
+        extern void ssx3_prof_start(const char *path);
+        const char *prof = getenv("RECOMP_PROFILE");
+        if (prof && *prof)
+            ssx3_prof_start(prof);
+    }
+
     /* Runtime options SSX 3 needs; set before anything reads them, and only
      * when not already set, so a run can still override them.
      *   RECOMP_TITLE_KEVENTS: XAPI's timer thread (guest 0x0021C1B5) and D3D
@@ -1122,7 +1130,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 /* the last 20 sessions and 10 crash dumps (with this one) */
                 logs_prune("ssx3_*_stderr.txt", 19);
                 logs_prune("crash_*.dmp", 9);
-                logs_prune("mark_*.bmp", 30);
+                logs_prune("mark_*.png", 30);
+                logs_prune("mark_*.bmp", 30);  /* marks from before v0.2.6 */
                 GetLocalTime(&st);
                 snprintf(logp + strlen(logp), sizeof logp - strlen(logp),
                          "\\ssx3_%04u%02u%02u-%02u%02u%02u_stderr.txt", st.wYear, st.wMonth,

@@ -1797,7 +1797,7 @@ index a045752..ac12872 100644
  else()
      # Linux: platform layer (POSIX host primitives) + OpenSSL for crypto.
      find_package(OpenSSL REQUIRED)
-diff --git a/src/kernel/guest_ptr.h b/src/kernel/guest_ptr.h
+diff --git a/new/src/kernel/guest_ptr.h b/src/kernel/guest_ptr.h
 new file mode 100644
 index 0000000..c24d5b4
 --- /dev/null
@@ -1830,7 +1830,7 @@ index 0000000..c24d5b4
 +uint32_t xbox_HostToGuest(const void *host);
 +
 +#endif
-diff --git a/src/kernel/guest_wasm.c b/src/kernel/guest_wasm.c
+diff --git a/new/src/kernel/guest_wasm.c b/src/kernel/guest_wasm.c
 new file mode 100644
 index 0000000..45b6a74
 --- /dev/null
@@ -1972,7 +1972,7 @@ index b9a02bc..73eab0c 100644
   * (for example to print who opened a file). NULL by default; called before the
   * path is translated, on the calling guest thread. Only paths a drive or
 diff --git a/src/kernel/kernel_bridge.c b/src/kernel/kernel_bridge.c
-index c65ba43..79cb9fb 100644
+index c65ba43..8e037f8 100644
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
 @@ -26,6 +26,7 @@
@@ -2820,7 +2820,7 @@ index c65ba43..79cb9fb 100644
      g_eax = va;
  }
  
-@@ -9371,14 +9864,218 @@ static int guest_cpu_enabled(void)
+@@ -9371,14 +9864,219 @@ static int guest_cpu_enabled(void)
      return g_guest_cpu_on;
  }
  
@@ -2964,17 +2964,18 @@ index c65ba43..79cb9fb 100644
 +    if (t_guest_held) {
 +        LONG gen = g_guest_gen;
 +        int waiting = fair_yield_on() && g_guest_waiters > 0;
-+        t_guest_held = 0;
-+        LeaveCriticalSection(&g_guest_cpu);
++        /* Nobody wants the CPU: keep it. Dropping and re-taking it here costs a
++         * sched_yield on every quantum -- a fifth of the guest's CPU time on the
++         * phone -- and buys a hand-over nobody asked for. */
 +        if (waiting) {
++            t_guest_held = 0;
++            LeaveCriticalSection(&g_guest_cpu);
 +            DWORD t0 = xbox_TickCountMs();
 +            while (g_guest_gen == gen && xbox_TickCountMs() - t0 < 5)
 +                SwitchToThread();
-+        } else {
-+            SwitchToThread();
++            guest_cpu_acquire(prio_index(t_guest_prio));
++            t_guest_held = 1;
 +        }
-+        guest_cpu_acquire(prio_index(t_guest_prio));
-+        t_guest_held = 1;
 +    }
 +}
 +
@@ -3039,7 +3040,7 @@ index c65ba43..79cb9fb 100644
      }
  }
  
-@@ -9391,11 +10088,160 @@ void guest_cpu_part(void)
+@@ -9391,11 +10089,160 @@ void guest_cpu_part(void)
      t_guest_thread = 0;
  }
  
@@ -3201,7 +3202,7 @@ index c65ba43..79cb9fb 100644
      if (held) {                        /* let other guest threads run meanwhile */
          t_guest_held = 0;
          LeaveCriticalSection(&g_guest_cpu);
-@@ -9403,11 +10249,16 @@ static void kernel_thunk_dispatch(void)
+@@ -9403,11 +10250,16 @@ static void kernel_thunk_dispatch(void)
      t_dispatch_depth++;
      kernel_thunk_dispatch_body();
      t_dispatch_depth--;
@@ -3219,7 +3220,7 @@ index c65ba43..79cb9fb 100644
          t_guest_held = 1;
      }
      (void)held;
-@@ -9447,9 +10298,9 @@ static void kernel_thunk_dispatch_body(void)
+@@ -9447,9 +10299,9 @@ static void kernel_thunk_dispatch_body(void)
  
      {
          static DWORD last_summary_tick = 0;
@@ -3231,7 +3232,7 @@ index c65ba43..79cb9fb 100644
              fprintf(stderr, "  [KERNEL] summary: %lld total calls, latest ordinal %u (slot %d) esp=0x%08X\n",
                      g_kernel_call_count, ordinal, slot, g_esp);
              /* And which ones, ranked. "Latest" names whatever the sample
-@@ -9671,7 +10522,7 @@ void xbox_kernel_bridge_init(void)
+@@ -9671,7 +10523,7 @@ void xbox_kernel_bridge_init(void)
      /* The thunk table lives in .rdata which is marked PAGE_READONLY.
       * Temporarily make it writable so we can patch the ordinals. */
      VirtualProtect(
@@ -3240,7 +3241,7 @@ index c65ba43..79cb9fb 100644
          g_thunk_table_count * 4,
          PAGE_READWRITE,
          &old_protect
-@@ -9749,7 +10600,7 @@ void xbox_kernel_bridge_init(void)
+@@ -9749,7 +10601,7 @@ void xbox_kernel_bridge_init(void)
          DWORD scan_protect;
          uint32_t low = g_thunk_table_base - LOOKBEHIND * 4;
  
@@ -3249,7 +3250,7 @@ index c65ba43..79cb9fb 100644
                         LOOKBEHIND * 4, PAGE_READWRITE, &scan_protect);
  
          for (i = 1; i <= LOOKBEHIND; i++) {
-@@ -9778,13 +10629,13 @@ void xbox_kernel_bridge_init(void)
+@@ -9778,13 +10630,13 @@ void xbox_kernel_bridge_init(void)
                      va, g_slot_ordinals[slot], slot);
          }
  
@@ -3266,7 +3267,7 @@ index c65ba43..79cb9fb 100644
          old_protect,
          &old_protect
 diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
-index 42135e0..64485bc 100644
+index 42135e0..ed8de06 100644
 --- a/src/kernel/kernel_file.c
 +++ b/src/kernel/kernel_file.c
 @@ -16,13 +16,18 @@
@@ -3311,41 +3312,7 @@ index 42135e0..64485bc 100644
  #if defined(_WIN32)
  /* ====================  Win32 backend  =================================== */
  /* ======================================================================== */
-@@ -229,6 +250,33 @@ NTSTATUS __stdcall xbox_NtCreateFile(
-     return STATUS_SUCCESS;
- }
- 
-+/* Temporary probe: which guest function reads which file, and how much.
-+ * SSX3_READLOG=1 turns it on; the caller VA comes from the kernel bridge. */
-+extern RECOMP_TLS uint32_t g_xbox_kernel_caller;
-+
-+static int readlog_on(void)
-+{
-+    static int on = -1;
-+    if (on < 0)
-+        on = getenv("SSX3_READLOG") ? 1 : 0;
-+    return on;
-+}
-+
-+static void readlog_note(HANDLE h, ULONG len, PLARGE_INTEGER off)
-+{
-+    char name[520];
-+    DWORD n;
-+
-+    if (!readlog_on())
-+        return;
-+    n = GetFinalPathNameByHandleA(h, name, sizeof name, FILE_NAME_NORMALIZED);
-+    if (!n || n >= sizeof name)
-+        return;
-+    fprintf(stderr, "RD %s off=%lld len=%u ret=%08X\n", name,
-+            off ? (long long)off->QuadPart : -1LL, (unsigned)len,
-+            (unsigned)g_xbox_kernel_caller);
-+}
-+
- NTSTATUS __stdcall xbox_NtReadFile(
-     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
-     PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length,
-@@ -792,6 +840,41 @@ static ULONG mode_to_xbox_attrs(mode_t m)
+@@ -792,6 +813,41 @@ static ULONG mode_to_xbox_attrs(mode_t m)
      return a;
  }
  
@@ -3387,7 +3354,7 @@ index 42135e0..64485bc 100644
  static NTSTATUS errno_to_status(int e)
  {
      switch (e) {
-@@ -805,6 +888,112 @@ static NTSTATUS errno_to_status(int e)
+@@ -805,6 +861,112 @@ static NTSTATUS errno_to_status(int e)
      }
  }
  
@@ -3500,7 +3467,7 @@ index 42135e0..64485bc 100644
  NTSTATUS __stdcall xbox_NtCreateFile(
      PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
      PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
-@@ -818,13 +1007,18 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -818,13 +980,18 @@ NTSTATUS __stdcall xbox_NtCreateFile(
          return STATUS_INVALID_PARAMETER;
  
      const char* xbox_path = get_xbox_path(ObjectAttributes);
@@ -3521,7 +3488,7 @@ index 42135e0..64485bc 100644
          if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
              mkdir(host_path, 0755);   /* EEXIST is fine */
          fd = open(host_path, O_RDONLY | O_DIRECTORY);
-@@ -833,8 +1027,33 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -833,8 +1000,33 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      }
  
      if (fd < 0) {
@@ -3555,7 +3522,7 @@ index 42135e0..64485bc 100644
          if (IoStatusBlock) {
              IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
              IoStatusBlock->Information = 0;
-@@ -843,6 +1062,16 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -843,6 +1035,16 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      }
  
      *FileHandle = w32_open_handle(fd, host_path);
@@ -3572,7 +3539,7 @@ index 42135e0..64485bc 100644
      if (IoStatusBlock) {
          IoStatusBlock->Status = STATUS_SUCCESS;
          IoStatusBlock->Information = (CreateDisposition == XBOX_FILE_CREATE) ? 2 : 1;
-@@ -860,16 +1089,15 @@ NTSTATUS __stdcall xbox_NtReadFile(
+@@ -860,16 +1062,15 @@ NTSTATUS __stdcall xbox_NtReadFile(
      if (!IoStatusBlock)
          return STATUS_INVALID_PARAMETER;
  
@@ -3592,7 +3559,7 @@ index 42135e0..64485bc 100644
      if (n < 0) {
          XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
          IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
-@@ -896,22 +1124,36 @@ NTSTATUS __stdcall xbox_NtWriteFile(
+@@ -896,22 +1097,36 @@ NTSTATUS __stdcall xbox_NtWriteFile(
      if (!IoStatusBlock)
          return STATUS_INVALID_PARAMETER;
  
@@ -3633,7 +3600,7 @@ index 42135e0..64485bc 100644
  
      IoStatusBlock->Status = STATUS_SUCCESS;
      IoStatusBlock->Information = (ULONG_PTR)n;
-@@ -923,6 +1165,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
+@@ -923,6 +1138,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
  {
      XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
      if (Handle && Handle != INVALID_HANDLE_VALUE) {
@@ -3641,7 +3608,7 @@ index 42135e0..64485bc 100644
          CloseHandle(Handle);
          return STATUS_SUCCESS;
      }
-@@ -933,11 +1176,28 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
+@@ -933,11 +1149,28 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
  {
      char host_path[MAX_PATH];
      const char* xbox_path = get_xbox_path(ObjectAttributes);
@@ -3673,7 +3640,7 @@ index 42135e0..64485bc 100644
      return STATUS_OBJECT_NAME_NOT_FOUND;
  }
  
-@@ -949,13 +1209,18 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+@@ -949,13 +1182,18 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
      if (!IoStatusBlock || !FileInformation)
          return STATUS_INVALID_PARAMETER;
  
@@ -3695,7 +3662,7 @@ index 42135e0..64485bc 100644
              return STATUS_UNSUCCESSFUL;
      }
  
-@@ -984,7 +1249,7 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
+@@ -984,7 +1222,7 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
          }
          case XboxFilePositionInformation: {
              PXBOX_FILE_POSITION_INFORMATION info = (PXBOX_FILE_POSITION_INFORMATION)FileInformation;
@@ -3704,7 +3671,7 @@ index 42135e0..64485bc 100644
              if (pos < 0) return STATUS_UNSUCCESSFUL;
              info->CurrentByteOffset.QuadPart = pos;
              IoStatusBlock->Status = STATUS_SUCCESS;
-@@ -1019,21 +1284,28 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+@@ -1019,21 +1257,28 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
      if (!IoStatusBlock || !FileInformation)
          return STATUS_INVALID_PARAMETER;
  
@@ -3737,7 +3704,7 @@ index 42135e0..64485bc 100644
                  return STATUS_UNSUCCESSFUL;
              IoStatusBlock->Status = STATUS_SUCCESS;
              return STATUS_SUCCESS;
-@@ -1044,7 +1316,10 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
+@@ -1044,7 +1289,10 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
               * matches NT "delete on close" semantics exactly. */
              if (info->DeleteFile) {
                  const char* p = w32_handle_path(FileHandle);
@@ -3749,7 +3716,7 @@ index 42135e0..64485bc 100644
              }
              IoStatusBlock->Status = STATUS_SUCCESS;
              return STATUS_SUCCESS;
-@@ -1078,7 +1353,12 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+@@ -1078,7 +1326,12 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
          case XboxFileFsSizeInformation: {
              PXBOX_FILE_FS_SIZE_INFORMATION info = (PXBOX_FILE_FS_SIZE_INFORMATION)FsInformation;
              struct statvfs vfs;
@@ -3763,7 +3730,7 @@ index 42135e0..64485bc 100644
              /* Xbox geometry, not the host's -- see the note on
               * XBOX_SECTORS_PER_CLUSTER above. */
              info->BytesPerSector = XBOX_BYTES_PER_SECTOR;
-@@ -1106,8 +1386,18 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+@@ -1106,8 +1359,18 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
  
  NTSTATUS __stdcall xbox_NtFlushBuffersFile(HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock)
  {
@@ -3784,7 +3751,7 @@ index 42135e0..64485bc 100644
      if (IoStatusBlock) {
          IoStatusBlock->Status = STATUS_SUCCESS;
          IoStatusBlock->Information = 0;
-@@ -1125,10 +1415,24 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+@@ -1125,10 +1388,24 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
      if (!FileInformation)
          return STATUS_INVALID_PARAMETER;
      const char* xbox_path = get_xbox_path(ObjectAttributes);
@@ -3812,7 +3779,7 @@ index 42135e0..64485bc 100644
  
      unix_to_filetime(st.st_ctime, 0, &FileInformation->CreationTime);
      unix_to_filetime(st.st_atime, 0, &FileInformation->LastAccessTime);
-@@ -1140,18 +1444,168 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+@@ -1140,18 +1417,168 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
      return STATUS_SUCCESS;
  }
  
@@ -3983,7 +3950,7 @@ index 42135e0..64485bc 100644
  NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
      PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation, ULONG Length,
-@@ -1170,6 +1624,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1170,6 +1597,15 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      if (!s_dir_cs_init) { InitializeCriticalSection(&s_dir_cs); s_dir_cs_init = TRUE; }
      EnterCriticalSection(&s_dir_cs);
  
@@ -3999,7 +3966,7 @@ index 42135e0..64485bc 100644
      /* Locate or create the per-handle enumeration context. */
      DIR_CONTEXT* ctx = NULL;
      for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
-@@ -1177,21 +1640,21 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1177,21 +1613,21 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
      if (!ctx) {
          for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
              if (s_dir_contexts[i].handle == NULL) { ctx = &s_dir_contexts[i]; break; }
@@ -4031,7 +3998,7 @@ index 42135e0..64485bc 100644
          if (FileName && FileName->Buffer && FileName->Length > 0) {
              USHORT n = FileName->Length;
              if (n >= sizeof(ctx->pattern)) n = sizeof(ctx->pattern) - 1;
-@@ -1200,52 +1663,52 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
+@@ -1200,52 +1636,52 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
          } else {
              strcpy(ctx->pattern, "*");
          }
@@ -4218,7 +4185,7 @@ index 1ad4fff..7ba275f 100644
      ExitProcess(0);
  }
  
-diff --git a/src/kernel/kernel_iso.c b/src/kernel/kernel_iso.c
+diff --git a/new/src/kernel/kernel_iso.c b/src/kernel/kernel_iso.c
 new file mode 100644
 index 0000000..0f08cb1
 --- /dev/null
@@ -4890,7 +4857,7 @@ index 0000000..0f08cb1
 +    }
 +    return count;
 +}
-diff --git a/src/kernel/kernel_iso.h b/src/kernel/kernel_iso.h
+diff --git a/new/src/kernel/kernel_iso.h b/src/kernel/kernel_iso.h
 new file mode 100644
 index 0000000..016d2b1
 --- /dev/null
@@ -5538,7 +5505,7 @@ index 4ebdfb9..6508945 100644
      default:
          xbox_log(XBOX_LOG_WARN, XBOX_LOG_XBOX,
              "ExQueryNonVolatileSetting: unhandled index 0x%02X", ValueIndex);
-diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+diff --git a/new/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
 new file mode 100644
 index 0000000..2102f59
 --- /dev/null
@@ -8335,7 +8302,7 @@ index 0b2d723..f612ac4 100644
      fflush(stderr);
  }
 diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
-index 72d5131..bd971b1 100644
+index 72d5131..514372f 100644
 --- a/src/kernel/xbox_memory_layout.c
 +++ b/src/kernel/xbox_memory_layout.c
 @@ -191,11 +191,11 @@ static const struct { uint32_t offset; uint32_t busy_mask; } NV2A_ACK[] = {
@@ -8543,7 +8510,7 @@ index 72d5131..bd971b1 100644
      n = (s_fb_pitch * s_fb_height) / 4;
      for (i = 0; i < n; i++) {
          sum = sum * 33u + p[i];
-@@ -873,6 +925,147 @@ static void framebuffer_probe_tick(void)
+@@ -873,15 +925,167 @@ static void framebuffer_probe_tick(void)
      fflush(stderr);
  }
  
@@ -8678,12 +8645,12 @@ index 72d5131..bd971b1 100644
 +            if ((*r & NV2A_IDLE[i].idle_mask) != NV2A_IDLE[i].idle_mask)
 +                *r |= NV2A_IDLE[i].idle_mask;
 +        }
-+        if (++spin & 63)
-+            YieldProcessor();
-+        else {
-+            QueryPerformanceCounter(&now);
-+            Sleep(idle_ticks > 0 && now.QuadPart - last.QuadPart > idle_ticks ? 1 : 0);
-+        }
++        QueryPerformanceCounter(&now);
++        if (idle_ticks > 0 && now.QuadPart - last.QuadPart > idle_ticks)
++            Sleep(1);              /* quiet: block instead of asking for a switch */
++        else
++            YieldProcessor();      /* burst: spin, a sched_yield here is a
++                                    * full context switch for a 20 us wait */
 +    }
 +    return 0;
 +}
@@ -8691,7 +8658,35 @@ index 72d5131..bd971b1 100644
  static DWORD WINAPI nv2a_ack_thread(LPVOID param)
  {
      volatile uint32_t *regs = (volatile uint32_t *)param;
-@@ -931,6 +1124,49 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
++    uint32_t prev_put = 0;
++    unsigned idle_passes = 0;
+     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
++        int work = 0;
++        /* Most passes find nothing to do. Notice that before spending a trip
++         * through the scheduler on it. */
++        uint32_t put_top = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
++        if (put_top != prev_put) {
++            prev_put = put_top;
++            work = 1;
++        }
+         for (size_t i = 0; i < sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]); i++) {
+             volatile uint32_t *r =
+                 (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
+             if (*r & NV2A_ACK[i].busy_mask) {
+                 *r &= ~NV2A_ACK[i].busy_mask;
++                work = 1;
+             }
+         }
+         for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
+@@ -889,6 +1093,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+                 (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
+             if ((*r & NV2A_IDLE[i].idle_mask) != NV2A_IDLE[i].idle_mask) {
+                 *r |= NV2A_IDLE[i].idle_mask;
++                work = 1;
+             }
+         }
+         /* DMA_GET used to be set to DMA_PUT here, at the top of the tick,
+@@ -931,6 +1136,49 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              static uint32_t last_put;
              DWORD now_ms = GetTickCount();
              uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
@@ -8741,7 +8736,7 @@ index 72d5131..bd971b1 100644
              if (put != last_put || (now_ms - last_put_ms) > 2000) {
                  /* Survey the segment the title just submitted, once. */
                  {
-@@ -1034,8 +1270,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1034,8 +1282,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              static uint32_t last_start = 0xFFFFFFFFu;
              uint32_t start = *(volatile uint32_t *)((char *)regs + 0x600800);
              if (start != last_start) {
@@ -8753,19 +8748,31 @@ index 72d5131..bd971b1 100644
                  fflush(stderr);
              }
          }
-@@ -1054,21 +1292,59 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+@@ -1054,21 +1304,70 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
           * up XNet. A live clock is also just the truth -- KeTickCount ticks on
           * hardware whether or not anyone is asleep. GetTickCount() shares the
           * millisecond unit, so the rate matches. */
 -        *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
 -                               + g_memory_offset) = GetTickCount();
 +        *(volatile uint32_t *)((uintptr_t)XBOX_HOST(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)) = xbox_TickCountMs();
++
++        /* Nothing to acknowledge and nothing submitted: yielding still costs a
++         * trip through the scheduler on every pass, and that is most of this
++         * thread's life. A millisecond of sleep is shorter than a frame at
++         * 60 Hz, so a kickoff is still answered within one frame. */
++        if (work) {
++            idle_passes = 0;
++            Sleep(0);
++        } else if (++idle_passes > 2) {
++            Sleep(1);
++        } else {
++            Sleep(0);
++        }
++    }
++    return 0;
++}
  
-         Sleep(0);  /* yield; the waiter is spinning on another core */
-     }
-     return 0;
- }
- 
+-        Sleep(0);  /* yield; the waiter is spinning on another core */
 +/* Write-1-to-clear for the vblank interrupt, without trapping MMIO.
 + *
 + * The vblank tick (kernel_bridge.c) raises PCRTC_INTR_0 = 1 | NV2A_VBLANK_MARK
@@ -8795,10 +8802,10 @@ index 72d5131..bd971b1 100644
 +            xbox_Nv2aSwmPulse();
 +        }
 +        Sleep(1);
-+    }
-+    return 0;
-+}
-+
+     }
+     return 0;
+ }
+ 
  static void xbox_Nv2aAckStart(void)
  {
 +    CloseHandle(CreateThread(NULL, 0, nv2a_intr_thread, g_nv2a_memory, 0, NULL));
@@ -8815,7 +8822,7 @@ index 72d5131..bd971b1 100644
      if (g_nv2a_ack_thread) {
          fprintf(stderr, "  NV2A busy-bit ack: %zu register(s) acknowledged\n",
                  sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]));
-@@ -1237,15 +1513,15 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
+@@ -1237,15 +1536,15 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
          /* The callee-saved registers and the stack, exactly as the CRT's
           * longjmp restores them: esp is the setjmp-time esp plus the return
           * address that setjmp's own ret would have popped. */
@@ -8836,7 +8843,7 @@ index 72d5131..bd971b1 100644
          g_ebp     = g_seh_ebp;
  
          s_jmp_used = i + 1;   /* the inner buffers died with their frames */
-@@ -1344,7 +1620,7 @@ static int watch_is_code(uint32_t va)
+@@ -1344,7 +1643,7 @@ static int watch_is_code(uint32_t va)
  static void watch_report(void)
  {
      const uint8_t *mem = (const uint8_t *)g_memory_offset;
@@ -8845,7 +8852,7 @@ index 72d5131..bd971b1 100644
      uint32_t esp = g_esp, i, shown = 0;
  
      if (now == g_watch_last)
-@@ -1362,7 +1638,7 @@ static void watch_report(void)
+@@ -1362,7 +1661,7 @@ static void watch_report(void)
          uint32_t v;
          if (!peek_readable(slot))
              break;
@@ -8854,7 +8861,7 @@ index 72d5131..bd971b1 100644
          if (watch_is_code(v)) {
              fprintf(stderr, "         [esp+%-4u] %08X\n", i * 4u, v);
              shown++;
-@@ -1379,7 +1655,7 @@ static void watch_report(void)
+@@ -1379,7 +1678,7 @@ static void watch_report(void)
              if (!peek_readable(slot))
                  break;
              fprintf(stderr, "         raw[esp+%-4u] %08X\n", i * 4u,
@@ -8863,7 +8870,7 @@ index 72d5131..bd971b1 100644
          }
      }
      fflush(stderr);
-@@ -1387,6 +1663,10 @@ static void watch_report(void)
+@@ -1387,6 +1686,10 @@ static void watch_report(void)
  
  static LONG CALLBACK watch_veh(PEXCEPTION_POINTERS ep)
  {
@@ -8874,7 +8881,7 @@ index 72d5131..bd971b1 100644
      DWORD code = ep->ExceptionRecord->ExceptionCode;
      DWORD old;
  
-@@ -1415,6 +1695,7 @@ static LONG CALLBACK watch_veh(PEXCEPTION_POINTERS ep)
+@@ -1415,6 +1718,7 @@ static LONG CALLBACK watch_veh(PEXCEPTION_POINTERS ep)
          }
      }
      return EXCEPTION_CONTINUE_SEARCH;
@@ -8882,7 +8889,7 @@ index 72d5131..bd971b1 100644
  }
  
  /* The target, which may be reached through pointers that do not exist yet.
-@@ -1437,7 +1718,7 @@ static int watch_resolve(uint32_t *out)
+@@ -1437,7 +1741,7 @@ static int watch_resolve(uint32_t *out)
      for (k = 0; k < g_watch_derefs; k++) {
          if (!peek_readable(a))
              return 0;
@@ -8891,7 +8898,7 @@ index 72d5131..bd971b1 100644
          if (!a)
              return 0;
      }
-@@ -1506,11 +1787,9 @@ static int watch_arm(uint32_t va)
+@@ -1506,11 +1810,9 @@ static int watch_arm(uint32_t va)
                          "not armed\n", g_watch_va);
          return 0;
      }
@@ -8905,7 +8912,7 @@ index 72d5131..bd971b1 100644
      g_watch_veh = AddVectoredExceptionHandler(1, watch_veh);
      if (!g_watch_veh
              || !VirtualProtect(g_watch_page, 4096, PAGE_READONLY, &old)) {
-@@ -1564,13 +1843,13 @@ void xbox_PeekSample(const char *label)
+@@ -1564,13 +1866,13 @@ void xbox_PeekSample(const char *label)
              end++;
          a = (uint32_t)va;
          for (k = 0; k < derefs && ok; k++) {
@@ -8921,7 +8928,7 @@ index 72d5131..bd971b1 100644
          else
              fprintf(stderr, " [%08X]=??", a);
          q = (*end == ',') ? end + 1 : end;
-@@ -1651,7 +1930,7 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
+@@ -1651,7 +1953,7 @@ static DWORD WINAPI xbox_watchdog_thread(LPVOID unused)
          uint32_t a = esp + i * 4;
          if (a < XBOX_STACK_BASE || a >= XBOX_STACK_TOP) break;
          fprintf(stderr, "    GS %08X %08X\n", a,
@@ -8930,7 +8937,7 @@ index 72d5131..bd971b1 100644
      }
      fflush(stderr);
      _exit(3);
-@@ -1704,6 +1983,10 @@ volatile uint32_t g_icall_trace[16] = {0};
+@@ -1704,6 +2006,10 @@ volatile uint32_t g_icall_trace[16] = {0};
  volatile uint32_t g_icall_trace_idx = 0;
  volatile uint64_t g_icall_count = 0;
  
@@ -8941,7 +8948,7 @@ index 72d5131..bd971b1 100644
  BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
  {
      g_force_return = getenv("RECOMP_FORCE_RETURN") != NULL;
-@@ -1739,6 +2022,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1739,6 +2045,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * With file mapping views, we create aliased mappings at 64 MB intervals
       * that all point to the same physical memory.
       */
@@ -8957,7 +8964,7 @@ index 72d5131..bd971b1 100644
      g_mapping_handle = CreateFileMappingA(
          INVALID_HANDLE_VALUE,   /* page file backed */
          NULL,                   /* default security */
-@@ -1790,7 +2082,35 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1790,7 +2105,35 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
           * this on Windows needs placeholder reservations (VirtualAlloc2). */
  #ifndef _WIN32
          g_span_size = g_memory_size * (size_t)(1 + XBOX_NUM_MIRRORS);
@@ -8994,7 +9001,7 @@ index 72d5131..bd971b1 100644
          if (g_span_base) {
              VirtualFree(g_span_base, g_memory_size, MEM_RELEASE);
              g_memory_base = MapViewOfFileEx(g_mapping_handle,
-@@ -1826,6 +2146,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1826,6 +2169,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          }
      }
  
@@ -9002,7 +9009,7 @@ index 72d5131..bd971b1 100644
      if (!g_memory_base) {
          fprintf(stderr, "xbox_MemoryLayoutInit: failed to map base view (%zu KB)\n",
                  g_memory_size / 1024);
-@@ -1908,7 +2229,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1908,7 +2252,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * Helper macro: convert Xbox VA to actual mapped address.
       * When g_memory_offset == 0 (ideal case), this is identity.
       */
@@ -9011,7 +9018,7 @@ index 72d5131..bd971b1 100644
  
      /*
       * Copy XBE header to base address.
-@@ -2088,7 +2409,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2088,7 +2432,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
               * slots, and kernel.h notes 366 is short by 12. A title importing
               * a high ordinal would have had its table truncated here. */
              for (uint32_t t = 0; t < XBOX_KERNEL_THUNK_TABLE_SIZE; t++) {
@@ -9020,7 +9027,7 @@ index 72d5131..bd971b1 100644
                  if (entry == 0) break;
                  thunk_count++;
              }
-@@ -2143,7 +2464,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2143,7 +2487,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * We use free space in the BSS area for the fake structures.
       */
      {
@@ -9029,7 +9036,7 @@ index 72d5131..bd971b1 100644
          #define MEM32_INIT(va, val) (*(uint32_t *)XBOX_VA(va) = (uint32_t)(val))
  
          /* Fake TIB at address 0x0 */
-@@ -2274,6 +2595,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2274,6 +2618,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t contig_native = XBOX_CONTIG_BASE + g_memory_offset;
@@ -9040,7 +9047,7 @@ index 72d5131..bd971b1 100644
          g_contig_mapping = CreateFileMappingW(
              INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
              0, (DWORD)XBOX_CONTIG_SIZE, NULL);
-@@ -2288,6 +2613,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2288,6 +2636,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                  MEM_RESERVE | MEM_COMMIT,
                  PAGE_READWRITE
              );
@@ -9048,7 +9055,7 @@ index 72d5131..bd971b1 100644
          if (g_contig_memory) {
              fprintf(stderr, "  Contiguous window: %u MB at Xbox VA 0x%08X\n",
                      XBOX_CONTIG_SIZE / (1024 * 1024), XBOX_CONTIG_BASE);
-@@ -2319,12 +2645,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2319,12 +2668,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t nv2a_native = XBOX_NV2A_BASE + g_memory_offset;
@@ -9066,7 +9073,7 @@ index 72d5131..bd971b1 100644
          /* The pushbuffer survey rides on the same poll, so either
           * variable arms it. */
          s_nv2a_trace = getenv("RECOMP_NV2A_TRACE") != NULL
-@@ -2364,12 +2695,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2364,12 +2718,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       */
      {
          uintptr_t mcpx_native = XBOX_MCPX_BASE + g_memory_offset;
@@ -9084,7 +9091,7 @@ index 72d5131..bd971b1 100644
          g_mcpx_regs = g_mcpx_memory;
          if (g_mcpx_memory) {
              /* AC'97 codec ready.
-@@ -2425,9 +2761,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2425,9 +2784,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                   * memory keeps what the title writes. */
                  enum { APU_TRAP_BYTES = 0x00030000 };
                  DWORD old_protect;
@@ -9098,7 +9105,7 @@ index 72d5131..bd971b1 100644
                  if (g_apu_mmio_trapped)
                      fprintf(stderr, "  APU: 0x%08X..0x%08X trapped for MMIO"
                                      " (GP/EP DSP memory left as RAM)\n",
-@@ -2437,7 +2777,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2437,7 +2800,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                      |= MCPX_AC97_CODEC_READY;
                  /* Before the trap is armed: this write would otherwise be
                   * the first thing to fault. */
@@ -9109,7 +9116,7 @@ index 72d5131..bd971b1 100644
                  fprintf(stderr, "  AC97: codec reported ready at 0x%08X"
                                  " (DirectSound will initialise)\n",
                          XBOX_MCPX_BASE + MCPX_AC97_CODEC_STATUS);
-@@ -2456,12 +2798,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2456,12 +2821,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      {
          uintptr_t flash_native = XBOX_FLASH_BASE + g_memory_offset;
  
@@ -9127,7 +9134,7 @@ index 72d5131..bd971b1 100644
          if (g_flash_memory) {
              fprintf(stderr, "  Flash ROM aperture: %u MB at Xbox VA "
                      "0x%08X (zeroed, not a real BIOS image)\n",
-@@ -2494,7 +2841,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2494,7 +2864,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          /* Already committed if the contiguous window above succeeded -
           * 0x80010000 sits inside it - so just use that storage. */
          g_kernel_memory = g_contig_memory
@@ -9136,7 +9143,7 @@ index 72d5131..bd971b1 100644
              : VirtualAlloc((LPVOID)kernel_native, KERNEL_PAGE_SIZE,
                             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
          if (g_kernel_memory) {
-@@ -2532,6 +2879,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2532,6 +2902,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
       * intervals. All views alias the same physical pages, so reads and
       * writes at any mirror address correctly access the base data.
       */
@@ -9144,7 +9151,7 @@ index 72d5131..bd971b1 100644
      {
          int mirrors_ok = 0;
          /* The tiled aperture is a specific architectural alias -- physical RAM
-@@ -2644,11 +2992,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2644,11 +3015,9 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
               * startup line. */
              {
                  volatile uint32_t *via_tiled =
@@ -9158,7 +9165,7 @@ index 72d5131..bd971b1 100644
                  uint32_t saved = *via_contig;
  
                  *via_tiled = 0xA5C30F17u;
-@@ -2674,6 +3020,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2674,6 +3043,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          }
      }
  
@@ -9166,7 +9173,7 @@ index 72d5131..bd971b1 100644
      xbox_WatchInit();
      fprintf(stderr, "xbox_MemoryLayoutInit: complete\n");
      return TRUE;
-@@ -2834,6 +3181,26 @@ ptrdiff_t xbox_GetMemoryOffset(void)
+@@ -2834,6 +3204,26 @@ ptrdiff_t xbox_GetMemoryOffset(void)
      return g_memory_offset;
  }
  
@@ -9193,7 +9200,7 @@ index 72d5131..bd971b1 100644
  /* ── Dynamic heap allocator ────────────────────────────────
   *
   * Simple bump allocator for MmAllocateContiguousMemory and similar.
-@@ -2916,7 +3283,7 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
+@@ -2916,7 +3306,7 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
          g_heap_blocks[i].free = 0;
          if (back && !heap_insert_free(i + 1, start + size, back))
              g_heap_blocks[i].size += back;   /* table full: keep it attached */
@@ -9202,7 +9209,7 @@ index 72d5131..bd971b1 100644
          return start;
      }
      return 0;
-@@ -2957,7 +3324,7 @@ static int g_thread_stacks_used = 0;
+@@ -2957,7 +3347,7 @@ static int g_thread_stacks_used = 0;
  uint32_t xbox_AllocThreadTib(void)
  {
      /* XBOX_VA is scoped to the loader; the same arithmetic, spelled here. */
@@ -9211,7 +9218,7 @@ index 72d5131..bd971b1 100644
      const uint32_t tib_size = 0x40;
      uint32_t tib, block, thread_data, total;
  
-@@ -3153,7 +3520,7 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
+@@ -3153,7 +3543,7 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
      if (reclaim)
          ReleaseSRWLockExclusive(&g_contig_lock);
  
@@ -9220,7 +9227,7 @@ index 72d5131..bd971b1 100644
      return result;
  }
  
-@@ -3267,7 +3634,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+@@ -3267,7 +3657,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
              }
              g_heap_blocks[i].free = 0;
              result = g_heap_blocks[i].addr;
@@ -9229,7 +9236,7 @@ index 72d5131..bd971b1 100644
              return result;
          }
      }
-@@ -3313,7 +3680,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
+@@ -3313,7 +3703,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
      g_heap_next = result + size;
  
      /* Zero-fill the allocated block (Xbox memory is always zeroed) */
@@ -9620,7 +9627,7 @@ index 93288d5..6a95c0f 100644
      struct sysinfo si;
      if (sysinfo(&si) != 0) return FALSE;
 diff --git a/src/platform/win32_compat.h b/src/platform/win32_compat.h
-index 22762ee..412d968 100644
+index 22762ee..c6f9427 100644
 --- a/src/platform/win32_compat.h
 +++ b/src/platform/win32_compat.h
 @@ -128,6 +128,30 @@ HANDLE      w32_open_handle(int fd, const char *host_path);
@@ -9654,15 +9661,21 @@ index 22762ee..412d968 100644
  /* ---- Events ----------------------------------------------------------- */
  HANDLE CreateEventA(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCSTR name);
  HANDLE CreateEventW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCWSTR name);
-@@ -168,6 +192,7 @@ DWORD  GetCurrentProcessId(void);
+@@ -168,6 +192,13 @@ DWORD  GetCurrentProcessId(void);
  BOOL   SetThreadPriority(HANDLE h, int priority);
  int    GetThreadPriority(HANDLE h);
  VOID   SwitchToThread(void);
++/* sched_yield, not the pause instruction: a busy spin here measured 49.0 FPS
++ * against 55.0 for the yield on the phone, at the same 480p settings. The
++ * cost is real (16% of the process's CPU sits in this call) but a spin pays
++ * for it in power and cluster contention. Waking this thread from the
++ * register write that needs it is the fix that would not trade one for the
++ * other. */
 +#define YieldProcessor() sched_yield()
  DWORD  QueueUserAPC(PAPCFUNC func, HANDLE thread, ULONG_PTR data);
  
  /* ---- Sleep ------------------------------------------------------------ */
-@@ -228,6 +253,7 @@ unsigned int _clearfp(void);   /* clear pending FPU exception flags */
+@@ -228,6 +259,7 @@ unsigned int _clearfp(void);   /* clear pending FPU exception flags */
  
  /* MSVC stack alloca alias. <alloca.h> provides the underlying function. */
  #include <alloca.h>
@@ -9670,7 +9683,7 @@ index 22762ee..412d968 100644
  #define _alloca(n) alloca(n)
  
  /* ---- Win32 file API (POSIX-backed) ----------------------------------- */
-@@ -438,7 +464,7 @@ VOID RaiseException(DWORD code, DWORD flags, DWORD nargs, const ULONG_PTR *args)
+@@ -438,7 +470,7 @@ VOID RaiseException(DWORD code, DWORD flags, DWORD nargs, const ULONG_PTR *args)
   * 
   * Note: GCC needs correct struct. This is from nxdk
   * */
@@ -10092,7 +10105,7 @@ index 2189a3b..b0f20b5 100644
 -    target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32)
 +    target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32 d3d11 dxgi)
  endif()
-diff --git a/src/video/fb_gamma.c b/src/video/fb_gamma.c
+diff --git a/new/src/video/fb_gamma.c b/src/video/fb_gamma.c
 new file mode 100644
 index 0000000..165eab0
 --- /dev/null
@@ -10175,10 +10188,10 @@ index 0000000..165eab0
 +    return s_lut_serial;
 +}
 diff --git a/src/video/fb_present.c b/src/video/fb_present.c
-index 08bae4b..9ee2f99 100644
+index 08bae4b..f010fb3 100644
 --- a/src/video/fb_present.c
 +++ b/src/video/fb_present.c
-@@ -15,12 +15,16 @@
+@@ -15,12 +15,19 @@
   * Off unless RECOMP_FB_WINDOW is set.
   */
  #include <stdint.h>
@@ -10190,12 +10203,15 @@ index 08bae4b..9ee2f99 100644
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
++#include <wincodec.h>
++#pragma comment(lib, "windowscodecs.lib")
++#pragma comment(lib, "ole32.lib")
 +#include "gpu_present.h"
 +#include "ui_overlay.h"
  
  extern ptrdiff_t xbox_GetMemoryOffset(void);
  
-@@ -42,6 +46,20 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
+@@ -42,6 +49,20 @@ static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
  static uint32_t     *s_present[2];
  static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
  
@@ -10216,7 +10232,7 @@ index 08bae4b..9ee2f99 100644
  void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
  {
      /* RECOMP_FB_VA pins the window to one guest address instead of following
-@@ -98,6 +116,62 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -98,6 +119,62 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
      InterlockedExchange(&s_present_idx, next);
  }
  
@@ -10279,7 +10295,7 @@ index 08bae4b..9ee2f99 100644
  /* Which keys are down, for the pad stand-in in src/input.
   *
   * GetAsyncKeyState looked like the cheaper way to ask and does not work
-@@ -110,6 +184,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
+@@ -110,6 +187,7 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
   * thread and read only by the USB thread, one byte at a time, and a press
   * seen a frame late is indistinguishable from one made a frame later. */
  static volatile unsigned char s_key_down[256];
@@ -10287,7 +10303,7 @@ index 08bae4b..9ee2f99 100644
  
  /* Title bar, the way ps3recomp's window shows it. Written by the flip,
   * read once a second by the window thread; a torn read shows one stale
-@@ -127,31 +202,301 @@ void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
+@@ -127,31 +205,347 @@ void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
          s_title[i] = 0;
  }
  
@@ -10477,38 +10493,44 @@ index 08bae4b..9ee2f99 100644
 +        {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, {0x1F,0x01,0x02,0x04,0x08,0x08,0x08},
 +        {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}};
 +    static const struct { char c; unsigned char rows[7]; } g_letters[] = {
-+        {'F', {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}}, {'P', {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}},
-+        {'S', {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}}, {'H', {0x11,0x11,0x11,0x1F,0x11,0x11,0x11}},
-+        {'O', {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}}, {'W', {0x11,0x11,0x11,0x15,0x15,0x15,0x0A}},
-+        {'N', {0x11,0x19,0x15,0x13,0x11,0x11,0x11}}, {'M', {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}},
-+        {'A', {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}}, {'X', {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}},
++        {'A', {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}}, {'B', {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}},
++        {'C', {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}}, {'D', {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E}},
++        {'E', {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}}, {'F', {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}},
++        {'G', {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F}}, {'H', {0x11,0x11,0x11,0x1F,0x11,0x11,0x11}},
++        {'I', {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E}}, {'J', {0x07,0x02,0x02,0x02,0x02,0x12,0x0C}},
++        {'K', {0x11,0x12,0x14,0x18,0x14,0x12,0x11}}, {'L', {0x10,0x10,0x10,0x10,0x10,0x10,0x1F}},
++        {'M', {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}}, {'N', {0x11,0x19,0x15,0x13,0x11,0x11,0x11}},
++        {'O', {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}}, {'P', {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}},
++        {'Q', {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}}, {'R', {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}},
++        {'S', {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}}, {'T', {0x1F,0x04,0x04,0x04,0x04,0x04,0x04}},
++        {'U', {0x11,0x11,0x11,0x11,0x11,0x11,0x0E}}, {'V', {0x11,0x11,0x11,0x11,0x11,0x0A,0x04}},
++        {'W', {0x11,0x11,0x11,0x15,0x15,0x15,0x0A}}, {'X', {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}},
++        {'Y', {0x11,0x11,0x0A,0x04,0x04,0x04,0x04}}, {'Z', {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}},
++        {'(', {0x02,0x04,0x08,0x08,0x08,0x04,0x02}}, {')', {0x08,0x04,0x02,0x02,0x02,0x04,0x08}},
 +        {'.', {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C}}};
 +    size_t i;
 +    if (ch >= '0' && ch <= '9')
 +        return g_digits[ch - '0'];
++    if (ch >= 'a' && ch <= 'z')
++        ch = (char)(ch - 'a' + 'A');
 +    for (i = 0; i < sizeof g_letters / sizeof g_letters[0]; i++)
 +        if (g_letters[i].c == ch)
 +            return g_letters[i].rows;
 +    return NULL;                        /* space */
 +}
 +
-+static void fps_overlay_draw(uint32_t *px, uint32_t w, uint32_t h)
++/* One line of text in a darkened box at (x0, y0), sc pixels per font pixel. */
++static void overlay_text(uint32_t *px, uint32_t w, uint32_t h, const char *text,
++                         int x0, int y0, int sc)
 +{
-+    char text[48];
-+    int sc = (int)(h / 240u), len, i, x0, y0, bw, bh, x, y;
-+    if (!fps_overlay_on() || !px || w < 64 || h < 32)
-+        return;
-+    memcpy(text, s_overlay_text, sizeof text);
-+    text[sizeof text - 1] = 0;
-+    len = (int)strlen(text);
-+    if (!len)
++    int len = (int)strlen(text), i, bw, bh, x, y;
++    if (!len || !px || w < 64 || h < 32)
 +        return;
 +    if (sc < 2) sc = 2;
-+    x0 = sc * 3; y0 = sc * 3;
 +    bw = (len * 6 + 2) * sc; bh = 10 * sc;
 +    if (x0 + bw > (int)w) bw = (int)w - x0;
 +    for (y = y0; y < y0 + bh && y < (int)h; y++)      /* darkened box */
-+        for (x = x0; x < x0 + bw; x++) {
++        for (x = x0; x < x0 + bw && x < (int)w; x++) {
 +            uint32_t p = px[(size_t)y * w + x];
 +            px[(size_t)y * w + x] = (p >> 2) & 0x3F3F3F;
 +        }
@@ -10524,6 +10546,46 @@ index 08bae4b..9ee2f99 100644
 +                        for (x = gx + cx * sc; x < gx + (cx + 1) * sc && x < (int)w; x++)
 +                            px[(size_t)y * w + x] = 0xFFFFFF;
 +    }
++}
++
++static void fps_overlay_draw(uint32_t *px, uint32_t w, uint32_t h)
++{
++    char text[48];
++    int sc = (int)(h / 240u);
++    if (!fps_overlay_on() || !px || w < 64 || h < 32)
++        return;
++    if (sc < 2) sc = 2;
++    memcpy(text, s_overlay_text, sizeof text);
++    text[sizeof text - 1] = 0;
++    overlay_text(px, w, h, text, sc * 3, sc * 3, sc);
++}
++
++/* xbox_FramebufferOsd: a short message under the FPS line for a few seconds
++ * (a setting changed with a key). Drawn whether or not the FPS overlay is up,
++ * so the feedback does not depend on it. */
++static char s_osd_text[64];
++static volatile LONG s_osd_until;
++
++void xbox_FramebufferOsd(const char *text)
++{
++    snprintf(s_osd_text, sizeof s_osd_text, "%s", text ? text : "");
++    InterlockedExchange(&s_osd_until, (LONG)GetTickCount() + 3000);
++}
++
++static void osd_draw(uint32_t *px, uint32_t w, uint32_t h)
++{
++    char text[64];
++    int sc = (int)(h / 240u);
++    if (!px || w < 64 || h < 32)
++        return;
++    if ((LONG)GetTickCount() > s_osd_until)
++        return;
++    if (sc < 2) sc = 2;
++    memcpy(text, s_osd_text, sizeof text);
++    text[sizeof text - 1] = 0;
++    if (!text[0])
++        return;
++    overlay_text(px, w, h, text, sc * 3, sc * 12, sc);   /* under the FPS line */
 +}
 +
 +/* Once a second from the window thread: the overlay's numbers, and with
@@ -10590,7 +10652,7 @@ index 08bae4b..9ee2f99 100644
          /* RECOMP_KEY_TRACE: each key as it arrives, edge-triggered.
           *
           * The obvious diagnostic -- sampling which keys are held, once a
-@@ -217,32 +562,55 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
+@@ -217,32 +611,55 @@ static void fb_convert(const uint8_t *src, uint32_t bpp)
   * A black window is ambiguous: it means either that the read path is wrong or
   * that the title really did render black. Dumping the same converted pixels
   * the window draws settles which, and does it without a screenshot. */
@@ -10654,7 +10716,7 @@ index 08bae4b..9ee2f99 100644
              line[x * 3 + 0] = (uint8_t)(src[x] & 0xFF);
              line[x * 3 + 1] = (uint8_t)((src[x] >> 8) & 0xFF);
              line[x * 3 + 2] = (uint8_t)((src[x] >> 16) & 0xFF);
-@@ -250,12 +618,155 @@ int xbox_FramebufferDumpBmp(const char *path)
+@@ -250,12 +667,254 @@ int xbox_FramebufferDumpBmp(const char *path)
          fwrite(line, 1, row, f);
      }
      free(line);
@@ -10669,11 +10731,110 @@ index 08bae4b..9ee2f99 100644
  }
  
 +
++/* The frame the window is showing, copied out: a renderer's published frame
++ * when there is a current one (gamma applied as on screen), else the guest
++ * framebuffer. Caller frees. */
++static uint32_t *grab_frame(uint32_t *w_out, uint32_t *h_out)
++{
++    LONG k = s_hi_front;
++    uint32_t *copy;
++    if (s_hi_have && (LONG)GetTickCount() - s_hi_tick < 500) {
++        size_t n = (size_t)s_hi_w[k] * s_hi_h[k];
++        copy = (uint32_t *)malloc(n * 4);
++        if (copy) {
++            memcpy(copy, s_hi[k], n * 4);
++            xbox_FramebufferApplyGamma(copy, n);
++            *w_out = s_hi_w[k];
++            *h_out = s_hi_h[k];
++            return copy;
++        }
++    }
++    if (!s_rgb)
++        return NULL;
++    copy = (uint32_t *)malloc((size_t)s_fb_width * s_fb_height * 4);
++    if (!copy)
++        return NULL;
++    memcpy(copy, s_rgb, (size_t)s_fb_width * s_fb_height * 4);
++    *w_out = s_fb_width;
++    *h_out = s_fb_height;
++    return copy;
++}
++
++static int path_is_png(const char *p)
++{
++    size_t n = p ? strlen(p) : 0;
++    return n > 4 && _stricmp(p + n - 4, ".png") == 0;
++}
++
++/* PNG through WIC, the encoder Windows ships: compressing 2560x1440 takes a
++ * moment, and the caller is an input thread rather than the one presenting. */
++static int write_png(const char *path, const uint32_t *pix, uint32_t w, uint32_t h)
++{
++    IWICImagingFactory *fact = NULL;
++    IWICStream *stream = NULL;
++    IWICBitmapEncoder *enc = NULL;
++    IWICBitmapFrameEncode *frame = NULL;
++    IPropertyBag2 *props = NULL;
++    WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
++    wchar_t wide[512];
++    int ok = -1;
++
++    if (!MultiByteToWideChar(CP_ACP, 0, path, -1, wide, (int)(sizeof wide / sizeof wide[0])))
++        return -1;
++    CoInitializeEx(NULL, COINIT_MULTITHREADED);
++    if (FAILED(CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
++                                &IID_IWICImagingFactory, (void **)&fact)) || !fact)
++        goto done;
++    if (FAILED(fact->lpVtbl->CreateStream(fact, &stream)) || !stream)
++        goto done;
++    if (FAILED(stream->lpVtbl->InitializeFromFilename(stream, wide, GENERIC_WRITE)))
++        goto done;
++    if (FAILED(fact->lpVtbl->CreateEncoder(fact, &GUID_ContainerFormatPng, NULL, &enc)) || !enc)
++        goto done;
++    if (FAILED(enc->lpVtbl->Initialize(enc, (IStream *)stream, WICBitmapEncoderNoCache)))
++        goto done;
++    if (FAILED(enc->lpVtbl->CreateNewFrame(enc, &frame, &props)) || !frame)
++        goto done;
++    if (FAILED(frame->lpVtbl->Initialize(frame, props)))
++        goto done;
++    if (FAILED(frame->lpVtbl->SetSize(frame, w, h)))
++        goto done;
++    if (FAILED(frame->lpVtbl->SetPixelFormat(frame, &fmt)))
++        goto done;
++    if (FAILED(frame->lpVtbl->WritePixels(frame, h, w * 4, w * h * 4, (BYTE *)pix)))
++        goto done;
++    if (FAILED(frame->lpVtbl->Commit(frame)))
++        goto done;
++    if (FAILED(enc->lpVtbl->Commit(enc)))
++        goto done;
++    ok = 0;
++done:
++    if (props) props->lpVtbl->Release(props);
++    if (frame) frame->lpVtbl->Release(frame);
++    if (enc) enc->lpVtbl->Release(enc);
++    if (stream) stream->lpVtbl->Release(stream);
++    if (fact) fact->lpVtbl->Release(fact);
++    return ok;
++}
++
 +/* The frame the window is showing, for the title's own diagnostics (SSX 3
-+ * takes one for its player mark). The Windows/D3D11 presenter shows one frame at a time, so this
-+ * is the same image its dump entry point writes. */
++ * takes one for its player mark). The path decides the format; a PNG that
++ * cannot be written falls back to the BMP writer. */
 +void xbox_FramebufferSnapshot(const char *path)
 +{
++    uint32_t w = 0, h = 0, *pix;
++
++    if (path && path_is_png(path)) {
++        pix = grab_frame(&w, &h);
++        if (pix) {
++            int rc = write_png(path, pix, w, h);
++            free(pix);
++            if (rc == 0) {
++                fprintf(stderr, "  [FBWIN] wrote %s (%ux%u, png)\n", path, w, h);
++                return;
++            }
++        }
++    }
 +    (void)xbox_FramebufferDumpBmp(path);
 +}
 +
@@ -10812,7 +10973,7 @@ index 08bae4b..9ee2f99 100644
  static DWORD WINAPI fb_thread(LPVOID unused)
  {
      HWND hwnd;
-@@ -274,18 +785,56 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -274,18 +933,56 @@ static DWORD WINAPI fb_thread(LPVOID unused)
          wc.lpszClassName = "XboxRecompFramebuffer";
          RegisterClassA(&wc);
      }
@@ -10876,7 +11037,7 @@ index 08bae4b..9ee2f99 100644
  
      memset(&bi, 0, sizeof(bi));
      bi.bmiHeader.biSize        = sizeof(bi.bmiHeader);
-@@ -299,6 +848,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -299,6 +996,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
  
      fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
              s_fb_width, s_fb_height);
@@ -10887,7 +11048,7 @@ index 08bae4b..9ee2f99 100644
  
      while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
          MSG msg;
-@@ -306,7 +859,43 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -306,7 +1007,44 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              TranslateMessage(&msg);
              DispatchMessageA(&msg);
          }
@@ -10914,6 +11075,7 @@ index 08bae4b..9ee2f99 100644
 +                LONG k = s_hi_front;
 +                double tw0 = pres_now_ms(), tw1;
 +                fps_overlay_draw(s_hi[k], s_hi_w[k], s_hi_h[k]);
++                osd_draw(s_hi[k], s_hi_w[k], s_hi_h[k]);
 +                xbox_UiDraw(s_hi[k], s_hi_w[k], s_hi_h[k]);
 +                if (s_seq_want)
 +                    seq_frame(s_hi[k], s_hi_w[k], s_hi_h[k]);
@@ -10932,7 +11094,7 @@ index 08bae4b..9ee2f99 100644
              /* A finished frame, published by the flip. Copied into s_rgb so
               * the dump path and GDI see one consistent image even if the
               * next flip lands mid-blit. */
-@@ -314,19 +903,29 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -314,19 +1052,30 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              if (s_present[idx])
                  memcpy(s_rgb, s_present[idx],
                         (size_t)s_fb_width * s_fb_height * 4);
@@ -10942,6 +11104,7 @@ index 08bae4b..9ee2f99 100644
 +            xbox_FramebufferApplyGamma(s_rgb, (size_t)s_fb_width * s_fb_height);
 +            if (gpu_present_active()) {
 +                fps_overlay_draw(s_rgb, s_fb_width, s_fb_height);
++                osd_draw(s_rgb, s_fb_width, s_fb_height);
 +                xbox_UiDraw(s_rgb, s_fb_width, s_fb_height);
 +                if (!gpu_present_frame_size(s_rgb, s_fb_width, s_fb_height))  /* vsync-paced, unless occluded */
 +                    Sleep(16);
@@ -10968,7 +11131,7 @@ index 08bae4b..9ee2f99 100644
          {
              /* One dump a few seconds in, so the title has had time to render
               * something rather than catching the first blank frame.
-@@ -357,6 +956,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -357,6 +1106,10 @@ static DWORD WINAPI fb_thread(LPVOID unused)
              if (now - t0 >= 1000) {
                  LONG f = s_flips;
                  wchar_t tb[128];
@@ -10979,7 +11142,7 @@ index 08bae4b..9ee2f99 100644
                  _snwprintf(tb, 127, L"%ls | FPS: %.1f | draws: %ld", s_title,
                             t0 ? (f - f0) * 1000.0 / (now - t0) : 0.0,
                             (long)s_frame_draws);
-@@ -365,9 +968,12 @@ static DWORD WINAPI fb_thread(LPVOID unused)
+@@ -365,9 +1118,12 @@ static DWORD WINAPI fb_thread(LPVOID unused)
                  t0 = now; f0 = f;
              }
          }
@@ -10993,7 +11156,7 @@ index 08bae4b..9ee2f99 100644
      ReleaseDC(hwnd, hdc);
      DestroyWindow(hwnd);
      free(s_rgb);
-@@ -390,11 +996,4 @@ void xbox_FramebufferWindowStart(void)
+@@ -390,11 +1146,4 @@ void xbox_FramebufferWindowStart(void)
          InterlockedExchange(&s_fb_running, 0);
  }
  
@@ -11005,12 +11168,12 @@ index 08bae4b..9ee2f99 100644
 -void xbox_FramebufferWindowSetTitle(const uint16_t *n, int m) { (void)n; (void)m; }
 -void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
  #endif
-diff --git a/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
+diff --git a/new/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
 new file mode 100644
-index 0000000..743e958
+index 0000000..88538a4
 --- /dev/null
 +++ b/src/video/fb_present_sdl.c
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,679 @@
 +/**
 + * POSIX counterpart of fb_present.c: show the guest framebuffer in an SDL2
 + * window. Same contract (RECOMP_FB_WINDOW, flip-time copy, BMP dump, snap
@@ -11049,8 +11212,105 @@ index 0000000..743e958
 +/* The window's client area in pixels (see fb_present.c). */
 +static volatile int s_client_w, s_client_h;
 +
-+/* No frame counter in this presenter; the port's setting is still accepted. */
-+void xbox_FramebufferSetFpsOverlay(int on) { (void)on; }
++#if defined(__ANDROID__)
++# include <android/log.h>
++# define PRESENT_LOG(...) __android_log_print(ANDROID_LOG_INFO, "SSX3PERF", __VA_ARGS__)
++#else
++# define PRESENT_LOG(...) fprintf(stderr, __VA_ARGS__)
++#endif
++
++/* FPS counter: RECOMP_FPS_OVERLAY=1 at launch, or a port's options screen
++ * switching it on through xbox_FramebufferSetFpsOverlay(). The number is the
++ * frames this presenter actually put on the screen, refreshed twice a second. */
++static volatile int s_fps_overlay = -1;
++static char  s_fps_text[16] = "FPS --";
++static double s_fps_t0, s_fps_n0;
++
++void xbox_FramebufferSetFpsOverlay(int on) { s_fps_overlay = on ? 1 : 0; }
++
++static int fps_overlay_on(void)
++{
++    if (s_fps_overlay < 0) {
++        const char *e = getenv("RECOMP_FPS_OVERLAY");
++        s_fps_overlay = e && *e && *e != '0';
++    }
++    return s_fps_overlay > 0;
++}
++
++/* 5x7 glyphs, bit 4 = leftmost column: the digits and the four letters the line
++ * needs, nothing else. */
++static const unsigned char *fps_glyph(char ch)
++{
++    static const unsigned char digits[10][7] = {
++        {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E},
++        {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E},
++        {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E},
++        {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, {0x1F,0x01,0x02,0x04,0x08,0x08,0x08},
++        {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}};
++    static const unsigned char F[7] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10};
++    static const unsigned char P[7] = {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10};
++    static const unsigned char S[7] = {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E};
++    static const unsigned char dot[7] = {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C};
++    if (ch >= '0' && ch <= '9') return digits[ch - '0'];
++    switch (ch) {
++    case 'F': return F;
++    case 'P': return P;
++    case 'S': return S;
++    case '.': return dot;
++    default:  return NULL;          /* space */
++    }
++}
++
++/* Text in a darkened box at the top left, scaled with the frame. */
++static void fps_overlay_draw(SDL_Renderer *ren, int w, int h)
++{
++    int sc = h / 200, i, x, y;
++    size_t len;
++    if (!ren || w < 64 || h < 64)
++        return;
++    if (sc < 2) sc = 2;
++    len = strlen(s_fps_text);
++    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
++    SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);
++    {
++        SDL_Rect box = { sc, sc, (int)(len * 6 * sc) + sc, 9 * sc };
++        SDL_RenderFillRect(ren, &box);
++    }
++    SDL_SetRenderDrawColor(ren, 235, 235, 235, 235);
++    for (i = 0; (size_t)i < len; i++) {
++        const unsigned char *g = fps_glyph(s_fps_text[i]);
++        int row;
++        if (!g)
++            continue;
++        for (row = 0; row < 7; row++) {
++            int col;
++            for (col = 0; col < 5; col++) {
++                SDL_Rect px;
++                if (!(g[row] & (1u << (4 - col))))
++                    continue;
++                px.x = (2 + i * 6 + col) * sc + sc;   /* + sc: inside the box */
++                px.y = (1 + row) * sc + sc;
++                px.w = px.h = sc;
++                SDL_RenderFillRect(ren, &px);
++            }
++        }
++    }
++}
++
++/* Called once a frame from the presenter: keeps the number moving. */
++static void fps_overlay_tick(double now)
++{
++    if (!s_fps_t0) { s_fps_t0 = now; s_fps_n0 = s_flips; return; }
++    if (now - s_fps_t0 >= 500.0) {
++        int f = s_flips;
++        double fps = (f - s_fps_n0) * 1000.0 / (now - s_fps_t0);
++        snprintf(s_fps_text, sizeof s_fps_text, "FPS %.0f", fps);
++        if (getenv("RECOMP_FPS_LOG"))
++            PRESENT_LOG("[FPS] %.1f\n", fps);
++        s_fps_t0 = now;
++        s_fps_n0 = f;
++    }
++}
 +
 +int xbox_FramebufferClientSize(int *w, int *h)
 +{
@@ -11494,6 +11754,8 @@ index 0000000..743e958
 +                if (!xbox_UiBlocksInput())
 +                    touch_pad_render(ren);
 +#endif
++                if (fps_overlay_on())
++                    fps_overlay_draw(ren, hi_w, hi_h);
 +                SDL_RenderPresent(ren);
 +                snap_trigger_poll(hi_rgb, hi_w, hi_h);
 +                goto shown;
@@ -11527,11 +11789,14 @@ index 0000000..743e958
 +        if (!xbox_UiBlocksInput())
 +            touch_pad_render(ren);
 +#endif
++        if (fps_overlay_on())
++            fps_overlay_draw(ren, (int)s_fb_width, (int)s_fb_height);
 +        SDL_RenderPresent(ren);
 +        snap_trigger_poll(NULL, 0, 0);
 +shown:
 +        {
 +            double now = now_ms();
++            fps_overlay_tick(now);
 +            if (now - t0 >= 1000.0) {
 +                int f = s_flips;
 +                char tb[128];
@@ -11581,13 +11846,19 @@ index 0000000..743e958
 +}
 +#endif
 +
++/* No overlay in this presenter: the message goes to the log. */
++void xbox_FramebufferOsd(const char *text)
++{
++    fprintf(stderr, "  [FBWIN] %s\n", text ? text : "");
++}
++
 +#endif /* !_WIN32 */
-diff --git a/src/video/fb_present_web.c b/src/video/fb_present_web.c
+diff --git a/new/src/video/fb_present_web.c b/src/video/fb_present_web.c
 new file mode 100644
-index 0000000..2b124ba
+index 0000000..2bb1150
 --- /dev/null
 +++ b/src/video/fb_present_web.c
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,283 @@
 +/**
 + * Browser counterpart of fb_present_sdl.c: the guest framebuffer for a page.
 + *
@@ -11855,6 +12126,12 @@ index 0000000..2b124ba
 +    (void)xbox_FramebufferDumpBmp(path);
 +}
 +
++/* No overlay in this presenter: the message goes to the console. */
++void xbox_FramebufferOsd(const char *text)
++{
++    fprintf(stderr, "  [FBWIN] %s\n", text ? text : "");
++}
++
 +void xbox_FramebufferWindowStart(void)
 +{
 +    if (!getenv("RECOMP_FB_WINDOW"))
@@ -11865,7 +12142,7 @@ index 0000000..2b124ba
 +            s_fb_width, s_fb_height);
 +}
 +#endif /* __EMSCRIPTEN__ */
-diff --git a/src/video/gpu_present.c b/src/video/gpu_present.c
+diff --git a/new/src/video/gpu_present.c b/src/video/gpu_present.c
 new file mode 100644
 index 0000000..7b3408b
 --- /dev/null
@@ -12252,7 +12529,7 @@ index 0000000..7b3408b
 +    return s_rtv != NULL;
 +}
 +#endif
-diff --git a/src/video/gpu_present.h b/src/video/gpu_present.h
+diff --git a/new/src/video/gpu_present.h b/src/video/gpu_present.h
 new file mode 100644
 index 0000000..8891786
 --- /dev/null
@@ -12275,12 +12552,12 @@ index 0000000..8891786
 +void gpu_present_shutdown(void);
 +#endif
 +#endif
-diff --git a/src/video/touch_pad.c b/src/video/touch_pad.c
+diff --git a/new/src/video/touch_pad.c b/src/video/touch_pad.c
 new file mode 100644
-index 0000000..9e1c030
+index 0000000..9fedfe4
 --- /dev/null
 +++ b/src/video/touch_pad.c
-@@ -0,0 +1,906 @@
+@@ -0,0 +1,1068 @@
 +/* On-screen controls for Android -- see touch_pad.h.
 + *
 + * A port of the "gamepad" touch overlay from LibertyRecompAndroid
@@ -12322,17 +12599,17 @@ index 0000000..9e1c030
 +#define FILL_R   90
 +#define FILL_G   90
 +#define FILL_B   90
-+#define FILL_A   55
++#define FILL_A   72
 +
-+#define HELD_R  200
-+#define HELD_G  200
-+#define HELD_B  200
-+#define HELD_A  105
++#define HELD_R  225
++#define HELD_G  225
++#define HELD_B  225
++#define HELD_A  140
 +
-+#define RING_R  215
-+#define RING_G  215
-+#define RING_B  215
-+#define RING_A  105
++#define RING_R  235
++#define RING_G  235
++#define RING_B  235
++#define RING_A  150
 +
 +#define LABEL_R 230
 +#define LABEL_G 230
@@ -12362,7 +12639,7 @@ index 0000000..9e1c030
 +    BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT,
 +    BTN_START, BTN_BACK,
 +    BTN_A, BTN_B, BTN_X, BTN_Y,
-+    BTN_LB, BTN_LT, BTN_RB, BTN_RT
++    BTN_LT, BTN_RT, BTN_HAND
 +};
 +
 +typedef struct {
@@ -12388,14 +12665,18 @@ index 0000000..9e1c030
 +static uint8_t s_digital;
 +static uint8_t s_analog[8];       /* A B X Y Black White L R */
 +static int     s_held[CONTROL_COUNT];
++static size_t  s_nctrl;
 +
 +static float   s_stick_x[2], s_stick_y[2];
 +static float   s_stick_ox[2], s_stick_oy[2];
 +static int     s_stick_owned[2];
 +
-+typedef struct { SDL_FingerID id; int ctrl; } finger;
++typedef struct { SDL_FingerID id; int ctrl; unsigned buttons; } finger;
 +static finger  s_fingers[MAX_FINGERS];
 +static int     s_nfingers;
++
++/* Where the face diamond was built, so its zone can be derived from a touch. */
++static float   s_face_cx, s_face_cy, s_face_r;
 +
 +/* The D-pad is one zone, not four buttons: a finger lands on it and then slides
 + * between directions the way a thumb moves across the pad on the console, which
@@ -12415,49 +12696,50 @@ index 0000000..9e1c030
 +static void build_layout(control *c, float w, float h)
 +{
 +    size_t n = 0;
++    /* Two columns on the left: the triggers and the stick hug the edge, the
++     * D-pad sits inboard of them. tx is measured to the circle, so L and R end
++     * up the same distance from their own edge. */
 +    float lx = 0.12f * w;
++    float tx = 0.085f * w;
 +
 +    memset(c, 0, sizeof(control) * CONTROL_COUNT);
 +
 +    /* Sticks first. The right stick has no resting place: it appears where the
-+     * camera finger lands. */
-+    c[n++] = (control){ KIND_STICK, lx, 0.72f * h, 0.105f * h, BTN_NONE, 0, "L", kLabel };
++     * board-press finger lands. */
++    c[n++] = (control){ KIND_STICK, tx, 0.60f * h, 0.105f * h, BTN_NONE, 0, "L", kLabel };
 +    c[n++] = (control){ KIND_STICK, w * 0.75f, 0.60f * h, 0.095f * h, BTN_NONE, 1, "R", kLabel };
 +
 +    /* D-pad, right of the left stick. */
 +    {
-+        float dx = lx + 0.26f * h, dy = 0.86f * h, arm = 0.078f * h, dr = 0.042f * h;
++        float dx = lx + 0.26f * h, dy = 0.80f * h, arm = 0.097f * h, dr = 0.052f * h;
 +        c[n++] = (control){ KIND_ARROW, dx, dy - arm, dr, BTN_UP, 0, "", kLabel };
 +        c[n++] = (control){ KIND_ARROW, dx, dy + arm, dr, BTN_DOWN, 1, "", kLabel };
 +        c[n++] = (control){ KIND_ARROW, dx - arm, dy, dr, BTN_LEFT, 2, "", kLabel };
 +        c[n++] = (control){ KIND_ARROW, dx + arm, dy, dr, BTN_RIGHT, 3, "", kLabel };
 +    }
 +
-+    /* LT over LB above the left stick. The reference also puts L3 here; SSX 3
-+     * binds nothing to a stick click, so the button would be dead. */
-+    {
-+        float br = 0.048f * h;
-+        c[n++] = (control){ KIND_TRIGGER, lx, 0.355f * h, br, BTN_LT, 0, "LT", kLabel };
-+        c[n++] = (control){ KIND_BUTTON, lx, 0.475f * h, br, BTN_LB, 0, "LB", kLabel };
-+    }
++    /* One larger trigger per side, where the trigger and bumper pair used to sit:
++     * SSX 3 binds nothing to a bumper that a trigger does not already do. */
++    c[n++] = (control){ KIND_TRIGGER, tx, 0.265f * h, 0.080f * h, BTN_LT, 0, "L", kLabel };
 +
 +    /* A/B/X/Y diamond in the lower right, with the Xbox 360 letter colours. */
 +    {
-+        float fx = w - 0.52f * h, fy = 0.80f * h, fs = 0.097f * h, fr = 0.052f * h;
++        float fx = w - (lx + 0.26f * h), fy = 0.80f * h;
++        float fs = 0.097f * h, fr = 0.052f * h;
 +        SDL_Color a = FACE_A, b = FACE_B, x = FACE_X, y = FACE_Y;
 +        c[n++] = (control){ KIND_BUTTON, fx, fy + fs, fr, BTN_A, 0, "A", a };
 +        c[n++] = (control){ KIND_BUTTON, fx + fs, fy, fr, BTN_B, 0, "B", b };
 +        c[n++] = (control){ KIND_BUTTON, fx - fs, fy, fr, BTN_X, 0, "X", x };
 +        c[n++] = (control){ KIND_BUTTON, fx, fy - fs, fr, BTN_Y, 0, "Y", y };
++        s_face_cx = fx; s_face_cy = fy; s_face_r = fs;
++        /* One handstand button where White and Black sat: the game gives both
++         * of those buttons the same handstand, so a pair is two ways to ask for
++         * one thing. */
++        c[n++] = (control){ KIND_BUTTON, fx + 2.57f * fs, fy + 0.575f * fs, fr,
++                            BTN_HAND, 0, "HAND", kLabel };
 +    }
 +
-+    /* RT over RB at the right edge (no R3, for the same reason). */
-+    {
-+        float br = 0.048f * h;
-+        float rx = w - 0.17f * h;
-+        c[n++] = (control){ KIND_TRIGGER, rx, 0.47f * h, br, BTN_RT, 1, "RT", kLabel };
-+        c[n++] = (control){ KIND_BUTTON, rx, 0.59f * h, br, BTN_RB, 0, "RB", kLabel };
-+    }
++    c[n++] = (control){ KIND_TRIGGER, w - tx, 0.265f * h, 0.080f * h, BTN_RT, 1, "R", kLabel };
 +
 +    /* BACK and START in the middle of the top edge. */
 +    {
@@ -12465,6 +12747,8 @@ index 0000000..9e1c030
 +        c[n++] = (control){ KIND_BUTTON, 0.44f * w, 0.075f * h, sr, BTN_BACK, 0, "BACK", kLabel };
 +        c[n++] = (control){ KIND_BUTTON, 0.56f * w, 0.075f * h, sr, BTN_START, 0, "START", kLabel };
 +    }
++
++    s_nctrl = n;
 +}
 +
 +/* ---- drawing ---------------------------------------------------------- */
@@ -12560,26 +12844,38 @@ index 0000000..9e1c030
 +    static const unsigned char A[7] = { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 };
 +    static const unsigned char B[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E };
 +    static const unsigned char C[7] = { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E };
++    static const unsigned char D[7] = { 0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E };
 +    static const unsigned char E[7] = { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F };
 +    static const unsigned char K[7] = { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 };
 +    static const unsigned char L[7] = { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F };
++    static const unsigned char P[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 };
 +    static const unsigned char R[7] = { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 };
 +    static const unsigned char S[7] = { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E };
 +    static const unsigned char T[7] = { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 };
 +    static const unsigned char X[7] = { 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 };
 +    static const unsigned char Y[7] = { 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04 };
++    static const unsigned char H[7] = { 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 };
++    static const unsigned char I[7] = { 0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E };
++    static const unsigned char N[7] = { 0x11, 0x19, 0x19, 0x15, 0x13, 0x13, 0x11 };
++    static const unsigned char W[7] = { 0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11 };
 +    static const unsigned char N3[7] = { 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E };
 +
 +    switch (ch) {
 +        case 'A': return A;
 +        case 'B': return B;
 +        case 'C': return C;
++        case 'D': return D;
 +        case 'E': return E;
++        case 'H': return H;
++        case 'I': return I;
 +        case 'K': return K;
 +        case 'L': return L;
++        case 'N': return N;
++        case 'P': return P;
 +        case 'R': return R;
 +        case 'S': return S;
 +        case 'T': return T;
++        case 'W': return W;
 +        case 'X': return X;
 +        case 'Y': return Y;
 +        case '3': return N3;
@@ -12645,6 +12941,7 @@ index 0000000..9e1c030
 +    SDL_Color fill = held ? (SDL_Color){ HELD_R, HELD_G, HELD_B, HELD_A }
 +                          : (SDL_Color){ FILL_R, FILL_G, FILL_B, FILL_A };
 +    SDL_Color ring = { RING_R, RING_G, RING_B, RING_A };
++    SDL_Color label = c->label_color;
 +
 +    if (c->r <= 0.0f)
 +        return;
@@ -12654,8 +12951,10 @@ index 0000000..9e1c030
 +        float cy = held ? s_stick_oy[c->index] : c->y;
 +        float kx, ky;
 +
-+        /* The camera stick shows only while it is being used. */
-+        if (c->index == 1 && !held)
++        /* Neither stick is drawn at rest: any touch on empty screen space works
++         * the stick of that half, so a parked ring only reads as a control that
++         * has to be hit. */
++        if (!held)
 +            return;
 +        fill_circle(ren, disc, cx, cy, c->r, fill);
 +        ring_circle(ren, cx, cy, c->r, ring);
@@ -12688,7 +12987,7 @@ index 0000000..9e1c030
 +    }
 +
 +    if (c->label && c->label[0])
-+        draw_label(ren, c->label, c->x, c->y, c->r, c->label_color);
++        draw_label(ren, c->label, c->x, c->y, c->r, label);
 +}
 +
 +/* ---- pad state -------------------------------------------------------- */
@@ -12730,13 +13029,17 @@ index 0000000..9e1c030
 +        { BTN_START, 0x10, -1 }, { BTN_BACK,  0x20, -1 },
 +        { BTN_A,     0x00,  0 }, { BTN_B,     0x00,  1 },
 +        { BTN_X,     0x00,  2 }, { BTN_Y,     0x00,  3 },
-+        /* The original Xbox pad has analog L/R instead of LB/RB: a bumper
-+         * sends the same trigger, fully pressed. */
-+        { BTN_LB,    0x00,  6 }, { BTN_LT,    0x00,  6 },
-+        { BTN_RB,    0x00,  7 }, { BTN_RT,    0x00,  7 },
++        /* Analog channels, in the pad's own order: A B X Y Black White L R. */
++        { BTN_LT,    0x00,  6 }, { BTN_RT,    0x00,  7 },
 +    };
 +    size_t i;
 +
++    /* Black and White are the same handstand in SSX 3, so one button sets both
++     * and whichever the guest looks at is satisfied. */
++    if (button == BTN_HAND) {
++        s_analog[4] = s_analog[5] = (uint8_t)(on ? 255 : 0);
++        return;
++    }
 +    for (i = 0; i < sizeof map / sizeof map[0]; i++) {
 +        if (map[i].button != button)
 +            continue;
@@ -12897,10 +13200,19 @@ index 0000000..9e1c030
 +}
 +
 +/* The button under a finger, or the stick of that half of the screen. */
++static unsigned buttons_at(const control *c, float px, float py);
++static int nearest_button(const control *c, unsigned mask, float px, float py);
++
 +static int hit_test(const control *c, float px, float py, float w)
 +{
 +    int best = -1, i;
 +    float best_distance = 1e30f;
++    unsigned under = buttons_at(c, px, py);
++
++    /* A thumb inside a button's capture ring means that button, even where the
++     * point would otherwise fall through to a stick's resting place. */
++    if (under)
++        return nearest_button(c, under, px, py);
 +
 +    /* The whole pad is a hit, out to the rim of an arrow and a little past it,
 +     * so a thumb sliding across it never falls through to the stick. */
@@ -12948,7 +13260,7 @@ index 0000000..9e1c030
 +        }
 +    }
 +
-+    for (i = 0; i < CONTROL_COUNT; i++) {
++    for (i = 0; i < (int)s_nctrl; i++) {
 +        float capture, distance;
 +        if (c[i].r <= 0.0f || c[i].kind == KIND_STICK)
 +            continue;
@@ -12962,6 +13274,121 @@ index 0000000..9e1c030
 +    if (best >= 0)
 +        return best;
 +    return px < w * 0.5f ? 0 : 1;   /* controls 0 and 1 are the sticks */
++}
++
++/* The diamond works the way the D-pad does: each axis fires on its own once the
++ * finger is off the centre that way, so a thumb planted between Y and B is
++ * both. Four separate circles only ever overlapped in a narrow lens between
++ * neighbours and not at all across the diamond. */
++#define FACE_SWITCH  0.45f
++#define FACE_REACH   1.42f
++
++
++static unsigned face_zone(const control *c, float px, float py)
++{
++    float dx = px - s_face_cx, dy = py - s_face_cy;
++    float t = FACE_SWITCH * s_face_r, lim = FACE_REACH * s_face_r;
++    unsigned mask = 0;
++    int i;
++
++    if (s_face_r <= 0.0f || dx * dx + dy * dy > lim * lim)
++        return 0;
++
++    for (i = 0; i < (int)s_nctrl; i++) {
++        int on;
++
++        switch (c[i].button) {
++        case BTN_Y: on = dy <= -t; break;
++        case BTN_A: on = dy >= t; break;
++        case BTN_X: on = dx <= -t; break;
++        case BTN_B: on = dx >= t; break;
++        default: continue;
++        }
++        if (on)
++            mask |= 1u << i;
++    }
++    if (!mask) {
++        /* Dead centre still means a button: whichever way the thumb leans. */
++        int want = fabsf(dx) > fabsf(dy) ? (dx < 0.0f ? BTN_X : BTN_B)
++                                         : (dy < 0.0f ? BTN_Y : BTN_A);
++
++        for (i = 0; i < (int)s_nctrl; i++)
++            if (c[i].button == want) {
++                mask = 1u << i;
++                break;
++            }
++    }
++    return mask;
++}
++
++/* Buttons under a point: the diamond by its axes, everything else by a capture
++ * ring wider than the drawn circle. */
++static unsigned buttons_at(const control *c, float px, float py)
++{
++    unsigned mask = face_zone(c, px, py);
++    int i;
++
++    for (i = 0; i < (int)s_nctrl; i++) {
++        float r, dx, dy;
++
++        if (c[i].kind != KIND_BUTTON && c[i].kind != KIND_TRIGGER)
++            continue;
++        if (c[i].button == BTN_A || c[i].button == BTN_B ||
++            c[i].button == BTN_X || c[i].button == BTN_Y)
++            continue;           /* the diamond is a zone, not four circles */
++        r = c[i].r * 1.55f;
++        dx = px - c[i].x;
++        dy = py - c[i].y;
++        if (dx * dx + dy * dy <= r * r)
++            mask |= 1u << i;
++    }
++    return mask;
++}
++
++static int nearest_button(const control *c, unsigned mask, float px, float py)
++{
++    int i, best = -1;
++    float best_d = 1e30f;
++
++    for (i = 0; i < (int)s_nctrl; i++) {
++        float dx, dy, d;
++
++        if (!(mask & (1u << i)))
++            continue;
++        dx = px - c[i].x;
++        dy = py - c[i].y;
++        d = dx * dx + dy * dy;
++        if (d < best_d) {
++            best_d = d;
++            best = i;
++        }
++    }
++    return best >= 0 ? best : 0;
++}
++
++/* The pad state is the union of every finger's set, so two fingers may hold the
++ * same button and one of them lifting does not release it. */
++static void apply_buttons(const control *c)
++{
++    static unsigned logged;
++    unsigned all = 0;
++    int i, f;
++
++    for (f = 0; f < s_nfingers; f++)
++        all |= s_fingers[f].buttons;
++    if (all != logged) {
++        logged = all;
++        TLOG("buttons %04x", all);
++    }
++    for (i = 0; i < (int)s_nctrl; i++) {
++        int want = (int)((all >> i) & 1u);
++
++        if (s_held[i] == want)
++            continue;
++        s_held[i] = want;
++        if (c[i].button != BTN_NONE)
++            set_button(c[i].button, want);
++    }
 +}
 +
 +static int finger_slot(SDL_FingerID id)
@@ -13057,6 +13484,7 @@ index 0000000..9e1c030
 +    switch (e->type) {
 +        case SDL_FINGERDOWN: {
 +            SDL_FingerID id = e->tfinger.fingerId;
++            unsigned mask = 0;
 +
 +            if (s_pad_present || s_nfingers >= MAX_FINGERS || finger_slot(id) >= 0)
 +                return;
@@ -13070,7 +13498,6 @@ index 0000000..9e1c030
 +                if (s_dp_id >= 0)
 +                    return;             /* one finger owns the D-pad */
 +                s_dp_id = id;
-+                dpad_start(ctrl, px, py);
 +            } else if (ctrl[index].kind == KIND_STICK) {
 +                /* A stick centres under the finger, kept fully on screen; one
 +                 * finger per stick. */
@@ -13086,16 +13513,25 @@ index 0000000..9e1c030
 +                                           ? (float)s_win_h - ctrl[index].r : py);
 +                s_stick_x[stick] = s_stick_y[stick] = 0.0f;
 +            } else {
-+                s_held[index] = 1;
-+                if (ctrl[index].button != BTN_NONE)
-+                    set_button(ctrl[index].button, 1);
++                /* Every button under the thumb, not only the nearest. A landing
++                 * on the rim between two still takes the closest one. */
++                mask = buttons_at(ctrl, px, py);
++                if (!mask)
++                    mask = 1u << index;
 +            }
++            s_fingers[s_nfingers].id = id;
++            s_fingers[s_nfingers].ctrl = index;
++            s_fingers[s_nfingers].buttons = mask;
++            s_nfingers++;
++
++            if (ctrl[index].kind == KIND_ARROW)
++                dpad_start(ctrl, px, py);
++            else if (ctrl[index].kind != KIND_STICK)
++                apply_buttons(ctrl);
++
 +            if (getenv("RECOMP_TOUCH_TRACE"))
 +                TLOG("down id=%lld %.0f,%.0f -> %d %s", (long long)id, (double)px,
 +                     (double)py, index, ctrl[index].label);
-+            s_fingers[s_nfingers].id = id;
-+            s_fingers[s_nfingers].ctrl = index;
-+            s_nfingers++;
 +            return;
 +        }
 +        case SDL_FINGERMOTION: {
@@ -13112,8 +13548,13 @@ index 0000000..9e1c030
 +                return;
 +            }
 +            index = s_fingers[slot].ctrl;
-+            if (ctrl[index].kind != KIND_STICK)
++            if (ctrl[index].kind != KIND_STICK) {
++                if (ctrl[index].kind != KIND_ARROW) {
++                    s_fingers[slot].buttons = buttons_at(ctrl, px, py);
++                    apply_buttons(ctrl);
++                }
 +                return;
++            }
 +            stick = ctrl[index].index;
 +            {
 +                float x = (px - s_stick_ox[stick]) / (ctrl[index].r * 0.85f);
@@ -13145,9 +13586,7 @@ index 0000000..9e1c030
 +                s_stick_owned[stick] = 0;
 +                s_stick_x[stick] = s_stick_y[stick] = 0.0f;
 +            } else {
-+                s_held[index] = 0;
-+                if (ctrl[index].button != BTN_NONE)
-+                    set_button(ctrl[index].button, 0);
++                apply_buttons(ctrl);
 +            }
 +            return;
 +        }
@@ -13181,13 +13620,13 @@ index 0000000..9e1c030
 +     * window pixels, so drop that transform for these draws. */
 +    SDL_RenderGetLogicalSize(ren, &saved_w, &saved_h);
 +    SDL_RenderSetLogicalSize(ren, 0, 0);
-+    for (i = 0; i < CONTROL_COUNT; i++)
++    for (i = 0; i < (int)s_nctrl; i++)
 +        draw_control(ren, disc, &ctrl[i], s_held[i]);
 +    SDL_RenderSetLogicalSize(ren, saved_w, saved_h);
 +}
 +
 +#endif /* __ANDROID__ */
-diff --git a/src/video/touch_pad.h b/src/video/touch_pad.h
+diff --git a/new/src/video/touch_pad.h b/src/video/touch_pad.h
 new file mode 100644
 index 0000000..9eae157
 --- /dev/null
@@ -13225,7 +13664,7 @@ index 0000000..9eae157
 +int touch_pad_enabled(void);
 +
 +#endif /* XBOX_TOUCH_PAD_H */
-diff --git a/src/video/ui_overlay.c b/src/video/ui_overlay.c
+diff --git a/new/src/video/ui_overlay.c b/src/video/ui_overlay.c
 new file mode 100644
 index 0000000..f91430f
 --- /dev/null
@@ -13260,7 +13699,7 @@ index 0000000..f91430f
 +{
 +    return xbox_ui_blocks_input ? xbox_ui_blocks_input() : 0;
 +}
-diff --git a/src/video/ui_overlay.h b/src/video/ui_overlay.h
+diff --git a/new/src/video/ui_overlay.h b/src/video/ui_overlay.h
 new file mode 100644
 index 0000000..f1de383
 --- /dev/null
@@ -13455,7 +13894,7 @@ index 8e9325e..e2089b0 100644
  /* ================================================================
   * Register name aliases for generated code
   *
-diff --git a/tests/iso_image/README.md b/tests/iso_image/README.md
+diff --git a/new/tests/iso_image/README.md b/tests/iso_image/README.md
 new file mode 100644
 index 0000000..b389a55
 --- /dev/null
@@ -13494,7 +13933,7 @@ index 0000000..b389a55
 +`121` is the 120 files under `data/` plus `default.xbe`; the byte count is the
 +tree's total, so a short read anywhere shows up as a mismatch rather than as a
 +plausible-looking success.
-diff --git a/tests/iso_image/run.bat b/tests/iso_image/run.bat
+diff --git a/new/tests/iso_image/run.bat b/tests/iso_image/run.bat
 new file mode 100644
 index 0000000..42df01e
 --- /dev/null
@@ -13526,7 +13965,7 @@ index 0000000..42df01e
 +:usage
 +echo usage: run.bat "<disc image>" "<extracted tree>"
 +exit /b 2
-diff --git a/tests/iso_image/test_main.c b/tests/iso_image/test_main.c
+diff --git a/new/tests/iso_image/test_main.c b/tests/iso_image/test_main.c
 new file mode 100644
 index 0000000..dac3de1
 --- /dev/null
