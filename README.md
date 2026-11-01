@@ -50,7 +50,7 @@ Releases are signed with the same key every time (the one committed in
 | **X Y B A** | the face buttons, in the Xbox 360 letter colours; the diamond is one zone, so a thumb planted between Y and B presses both, and a thumb rolled across it keeps what it covers |
 | **HAND** | a hand plant, or hand spring — this is what the pad's White and Black buttons both do |
 | **BACK** / **START** | back, pause |
-| **sticks** | not drawn at rest: any touch on empty screen space is that half's stick, and the ring appears under your thumb. The left half is the board stick, the right half the camera |
+| **sticks** | not drawn at rest: any touch on empty screen space is that half's stick, and the ring appears under your thumb. The **left stick** steers and brakes; the **right stick** does board presses |
 
 A **real controller** works too: connect one over Bluetooth or USB and the game reads it as pad 0,
 exactly like the touch pad, with the on-screen controls hidden while it is connected.
