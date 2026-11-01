@@ -102,6 +102,26 @@ runs at 480p the same build measured 46 FPS at 44.5 C where it had started at
 58 FPS at 39 C. The phone throttles, and every measurement above is only
 comparable with an A/B run back to back and at the same battery temperature.
 
+### Two things that did not work
+
+**Initial-exec TLS** would delete `linker64` from the guest thread entirely, but
+bionic will not have it in a dlopened library: `System.loadLibrary` fails with
+`TLS symbol "g_mm0" in dlopened libmain.so referenced from libmain.so using IE
+access model`, and nothing renders. The build does produce the right
+relocations (`R_AARCH64_TLS_TPREL`, no `__tls_get_addr`), so it is the loader,
+not the compiler. Getting the registers out of TLS needs a different model (a
+single thread-pointer to a register block, or plain globals plus save/restore at
+the guest-CPU hand-over), not a different `-ftls-model`.
+
+**A byte->float table for vertex attributes.** `fetch_attr` divides by 255.0f,
+which is a real divide for clang, and it is 17.5% of the render thread -- but
+replacing the divides with a 256-entry table of the same values changed nothing:
+527 samples of `fetch_attr` before, 531 after, same share of the thread. The
+switch and the memory reads are the cost, not the arithmetic. What would move it
+is not decoding attributes per vertex at all: build the converted vertex buffer
+once per (buffer, layout, count) and reuse it across draws until the guest writes
+into that range.
+
 ## Reproducing
 
     scripts/perf_bench.sh A 1080 2      # label, RECOMP_RES, RECOMP_MSAA

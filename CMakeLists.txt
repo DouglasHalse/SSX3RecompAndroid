@@ -148,6 +148,13 @@ if(WIN32)
 elseif(ANDROID)
     # libmain.so carries the game; SDL2 and Vulkan are its only outside deps.
     target_link_libraries(${PROJECT_NAME} PRIVATE m log android dl)
+    # The guest's registers are thread-locals that every recompiled instruction
+    # touches through RECOMP_TLS, and general-dynamic puts __tls_get_addr in
+    # linker64 on that path (11% of the guest thread's samples). Trying
+    # -ftls-model=initial-exec does not work: bionic refuses IE relocations in a
+    # dlopened library ("TLS symbol \"g_mm0\" ... using IE access model") and the
+    # app dies in System.loadLibrary. Removing the call needs the registers out
+    # of TLS, not a different TLS model.
 elseif(EMSCRIPTEN)
     # main() runs on a worker (PROXY_TO_PTHREAD): guest code blocks freely and
     # the browser thread stays free for input, audio and presenting. Guest
