@@ -9633,10 +9633,10 @@ index 08bae4b..bd1a6b0 100644
  #endif
 diff --git a/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
 new file mode 100644
-index 0000000..e0541d2
+index 0000000..88538a4
 --- /dev/null
 +++ b/src/video/fb_present_sdl.c
-@@ -0,0 +1,670 @@
+@@ -0,0 +1,679 @@
 +/**
 + * POSIX counterpart of fb_present.c: show the guest framebuffer in an SDL2
 + * window. Same contract (RECOMP_FB_WINDOW, flip-time copy, BMP dump, snap
@@ -9674,6 +9674,13 @@ index 0000000..e0541d2
 +
 +/* The window's client area in pixels (see fb_present.c). */
 +static volatile int s_client_w, s_client_h;
++
++#if defined(__ANDROID__)
++# include <android/log.h>
++# define PRESENT_LOG(...) __android_log_print(ANDROID_LOG_INFO, "SSX3PERF", __VA_ARGS__)
++#else
++# define PRESENT_LOG(...) fprintf(stderr, __VA_ARGS__)
++#endif
 +
 +/* FPS counter: RECOMP_FPS_OVERLAY=1 at launch, or a port's options screen
 + * switching it on through xbox_FramebufferSetFpsOverlay(). The number is the
@@ -9761,6 +9768,8 @@ index 0000000..e0541d2
 +        int f = s_flips;
 +        double fps = (f - s_fps_n0) * 1000.0 / (now - s_fps_t0);
 +        snprintf(s_fps_text, sizeof s_fps_text, "FPS %.0f", fps);
++        if (getenv("RECOMP_FPS_LOG"))
++            PRESENT_LOG("[FPS] %.1f\n", fps);
 +        s_fps_t0 = now;
 +        s_fps_n0 = f;
 +    }

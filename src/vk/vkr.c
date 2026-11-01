@@ -1,4 +1,11 @@
 #include "vkr.h"
+
+#if defined(__ANDROID__)
+# include <android/log.h>
+# define VKRLOG(...) __android_log_print(ANDROID_LOG_INFO, "SSX3PERF", __VA_ARGS__)
+#else
+# define VKRLOG(...) fprintf(stderr, __VA_ARGS__)
+#endif
 #include "../log.h"
 
 #include "vkr_thread.h"
@@ -1628,7 +1635,7 @@ static void prof_report(VkrContext *c, int slot)
         passes += fr->npass;
         if (total > mx) mx = total;
         if (nf == 120) {
-            fprintf(stderr, "[GPUPROF] 120 frames: GPU avg %.2f ms, max %.2f ms, %.1f passes\n",
+            VKRLOG("[GPUPROF] 120 frames: GPU avg %.2f ms, max %.2f ms, %.1f passes\n",
                     sum / nf, mx, (double)passes / nf);
             sum = mx = 0; nf = passes = 0;
         }
@@ -1648,11 +1655,11 @@ static void prof_report(VkrContext *c, int slot)
             }
         }
     }
-    fprintf(stderr, "[GPUPROF] frame GPU %.1f ms, %u draws, target %ux%u; top draws:\n",
+    VKRLOG("[GPUPROF] frame GPU %.1f ms, %u draws, target %ux%u; top draws:\n",
             total, n - 2, c->sw, c->sh);
     for (k = 0; k < 8 && top[k] > 0; k++) {
         const VkrProfDraw *m = &fr->meta[top[k]];
-        fprintf(stderr, "[GPUPROF]   #%d %.2f ms %s n %u %s blend %u %X/%X eq %X mask %X"
+        VKRLOG("[GPUPROF]   #%d %.2f ms %s n %u %s blend %u %X/%X eq %X mask %X"
                 " stages %05X final0 %08X alpha %X tex %ux%u %ux%u clip %ux%u psize %.1f\n",
                 top[k], (double)(ts[top[k]] - ts[top[k] - 1]) * c->ts_period / 1e6,
                 m->topo == 2 ? "points" : m->topo == 1 ? "lines" : "tris", m->nidx,

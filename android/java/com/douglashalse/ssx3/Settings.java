@@ -75,6 +75,14 @@ public final class Settings {
                 "cam", "RECOMP_CAM", false));
         ALL.add(toggle("Display", "FPS counter", "Show the frame rate in the corner",
                 "fps", "RECOMP_FPS_OVERLAY", false));
+        /* The render target the GPU draws and the frame the presenter copies,
+         * gammas and uploads every single frame: the panel's height is the
+         * sharp default, the two lower ones are what unlock a steady 60. */
+        ALL.add(new Opt("Display", "Render resolution",
+                "Internal render target: the panel, 720p, or the original 480",
+                "res", "RECOMP_RES",
+                new String[] {"Panel", "720p", "Original (480)"},
+                new String[] {"auto", "720", "480"}, 0));
 
         /* Graphics */
         ALL.add(new Opt("Graphics", "Anti-aliasing", "MSAA smooths edges, costs fill rate",
@@ -197,9 +205,18 @@ public final class Settings {
             out.write("# Written by the launcher's Settings screen. The game reads\n"
                     + "# this before it starts; edits made here survive until the\n"
                     + "# next time a setting changes.\n");
-            out.write("RECOMP_RES=" + renderHeight(ctx) + "\n");
+            int res = renderHeight(ctx);
             for (Opt o : ALL)
-                if (o.env != null)
+                if (o.env != null && o.env.equals("RECOMP_RES")) {
+                    String v = value(ctx, o);
+                    if (!v.equals("auto"))
+                        try {
+                            res = Integer.parseInt(v);
+                        } catch (NumberFormatException ignored) { }
+                }
+            out.write("RECOMP_RES=" + res + "\n");
+            for (Opt o : ALL)
+                if (o.env != null && !o.env.equals("RECOMP_RES"))
                     out.write(o.env + "=" + value(ctx, o) + "\n");
         } finally {
             out.close();

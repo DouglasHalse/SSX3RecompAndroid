@@ -75,4 +75,8 @@ target_link_libraries(vkr PUBLIC Vulkan::Vulkan)
 
 add_executable(vkr_selftest vkr_selftest.c)
 target_link_libraries(vkr_selftest PRIVATE vkr)
+if(ANDROID)
+    # vkr.c's instrumentation reports through logcat on Android
+    target_link_libraries(vkr_selftest PRIVATE log)
+endif()
 target_sources(vkr_selftest PRIVATE ../log.c)   # vkr.c logs through log_msg
