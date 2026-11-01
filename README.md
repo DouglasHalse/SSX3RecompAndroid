@@ -1,19 +1,15 @@
-# SSX3RecompNative
+# SSX3RecompAndroid
 
 [![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/1080-ssx-3/)
 
-A fork of [ssx3-recomp](https://github.com/koenhendriks/SSX3-recomp) — the static recompilation
-of **SSX 3** (original Xbox, PAL) — where the game's settings live **in the game**. There is no
-settings screen before play: the OPTIONS screen is drawn by the port itself, over the running
-frame, on the phone and on the desktop ([what it looks like](#what-this-fork-adds)).
-
-The game's PowerPC code is recompiled to native ARM64 (or x64) and the Xbox GPU is emulated on
-Vulkan. **There is no emulator in between**: it runs on the device itself, with on-screen
-controls and saves written to it.
+An **Android port** of [ssx3-recomp](https://github.com/koenhendriks/SSX3-recomp), the static
+recompilation of **SSX 3** (original Xbox, PAL): the game's PowerPC code is recompiled to
+native ARM64 and the Xbox GPU is emulated on Vulkan. **There is no emulator in between**: it
+runs on the phone itself, with on-screen controls and saves written to the device.
 
 Upstream targets Windows and Linux and supplies almost everything here: the recompiled code,
 the Vulkan renderer, the launcher, HD textures, widescreen. This fork adds the Android platform
-layer, what a phone needs, and the in-game options screen. The toolkit side of it lives in
+layer and what a phone needs. The toolkit side of it lives in
 [DouglasHalse/xboxrecomp](https://github.com/DouglasHalse/xboxrecomp) (branch `android-port`).
 
 ## Made with AI
@@ -63,7 +59,6 @@ exactly like the touch pad, with the on-screen controls hidden while it is conne
 
 | | |
 |---|---|
-| **Options in the game.** | The list the launcher used to hold (resolution, aspect, antialiasing, filtering, draw distance, shadows, HD textures, CRT, motion blur, HUD placement, frame counter, audio, intro, fast loading, cheats, log detail) is a screen inside the game: the **OPTIONS** button at the top of the screen on a phone, **F10** or a pad's **Back** on a desktop. It is drawn over the finished frame in the title's own colours, and holds the title's input while it is up. Draw distance, HUD placement and the frame counter apply as the value changes; the others are marked as taking effect after a restart. Choices go to `ssx3.cfg`, which beats both the launcher and the environment. |
 | **An Android build.** | `android/` packages the port with the NDK and **no Gradle**: aapt2, javac, d8, zipalign, apksigner. arm64-v8a, minSdk 30, `libmain.so` + `libSDL2.so`, Vulkan through the phone's own driver. |
 | **It boots on a phone.** | The guest's 4 GB are reserved at a low base, because Android hands out 39-bit user addresses and refuses the fixed mappings a desktop takes for granted; the framebuffer is presented through SDL after SDL_main owns the window and the game runs on its own thread; storage is rooted in the app's own folder, which needs no permission; everything the game prints goes to logcat. |
 | **On-screen controls.** | An Xbox pad drawn over the frame — one large trigger per side, the ABXY diamond with its letter colours, a D-pad, a HAND button and BACK/START — reported as pad 0 through the same XID report a physical controller uses, so the game reads it exactly like real hardware. The face diamond and the D-pad are zones rather than four circles each, so one thumb can hold two buttons at once; the sticks have no resting ring and appear under the thumb wherever empty screen space is touched. The layout, colours and hit rules started from [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid)'s gamepad overlay (see [Inspiration](#inspiration)), including its rule that the pad **disappears while a real controller is connected**. Sticks clicks (L3/R3) are left out: SSX 3 binds nothing to them. `RECOMP_TOUCH_PAD=0` turns it off; `RECOMP_TOUCH_TRACE=1` logs what each touch hit. |
@@ -212,16 +207,13 @@ connected, and press Play. The choices are kept in `launcher.ini`.
 `ssx3_recomp.exe`, a player README; no game files) for running it without
 a build environment: unzip, run `launcher.exe`, play.
 
-The launcher still works and still keeps `launcher.ini`, but the game's own
-screen is the settings home: `ssx3.cfg` overrides whatever the launcher passes
-for the rows it has been used to change.
-
-On Android the launcher is now **Select game image** and **Play** only; the
-options live in the game itself, behind the **OPTIONS** button at the top of the
-screen, and are kept in `ssx3.cfg` next to `game/`. See
-[`docs/android/SETTINGS.md`](docs/android/SETTINGS.md). The launcher's old
-Settings screen wrote `recomp.cfg`, which is still read first — anything in
-`ssx3.cfg` overrides it.
+On Android the launcher's **Settings** screen carries the options a phone
+needs: aspect (fill or 4:3), modern camera, FPS counter, anti-aliasing,
+anisotropic filtering, draw distance, shadows, HD textures, HUD edges, CRT
+filter, motion blur, intro and fast boot, debug menu, money cheat, and log
+level. There is no resolution row: the game renders at the display's short
+side. The choices live in `recomp.cfg` next to `game/`; see
+[`docs/android/SETTINGS.md`](docs/android/SETTINGS.md).
 
 From a console, `tools\play.bat` does the same with the defaults, which
 follow your monitor.
