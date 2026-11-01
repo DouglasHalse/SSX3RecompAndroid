@@ -1225,11 +1225,14 @@ index caef326..6d5d794 100644
      find_package(SDL2 REQUIRED)
      target_link_libraries(xbox_input PUBLIC platform SDL2::SDL2)
 diff --git a/src/input/xinput_device.c b/src/input/xinput_device.c
-index a91edbe..ae120d6 100644
+index a91edbe..3f97d51 100644
 --- a/src/input/xinput_device.c
 +++ b/src/input/xinput_device.c
-@@ -13,6 +13,135 @@
+@@ -11,8 +11,138 @@
+  */
+ 
  #include "xinput_xbox.h"
++#include "../video/ui_overlay.h"
  #include <stdlib.h>
  #include <string.h>
 +#include <stdio.h>
@@ -1364,7 +1367,7 @@ index a91edbe..ae120d6 100644
  
  /* ======================================================================== */
  #if defined(_WIN32)
-@@ -87,43 +216,49 @@ static SHORT axis_from_keys(int negative, int positive)
+@@ -87,43 +217,49 @@ static SHORT axis_from_keys(int negative, int positive)
  static void keyboard_state(XBOX_INPUT_STATE *pState)
  {
      static DWORD packet;
@@ -1439,7 +1442,7 @@ index a91edbe..ae120d6 100644
  void xbox_InputInit(void)
  {
      for (DWORD i = 0; i < XBOX_MAX_CONTROLLERS; i++) {
-@@ -141,7 +276,17 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+@@ -141,7 +277,17 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
      if (dwPort >= XBOX_MAX_CONTROLLERS || !pState)
          return ERROR_DEVICE_NOT_CONNECTED;
  
@@ -1458,7 +1461,7 @@ index a91edbe..ae120d6 100644
      if (result != ERROR_SUCCESS) {
          g_controller_connected[dwPort] = FALSE;
          if (dwPort == 0 && keyboard_enabled()) {
-@@ -156,22 +301,25 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+@@ -156,22 +302,25 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
  
      memset(pState, 0, sizeof(XBOX_INPUT_STATE));
      pState->dwPacketNumber = xi_state.dwPacketNumber;
@@ -1500,7 +1503,7 @@ index a91edbe..ae120d6 100644
  
      pState->Gamepad.sThumbLX = xi_state.Gamepad.sThumbLX;
      pState->Gamepad.sThumbLY = xi_state.Gamepad.sThumbLY;
-@@ -216,6 +364,12 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
+@@ -216,6 +365,12 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
  
      if (dwPort >= XBOX_MAX_CONTROLLERS || !pVibration)
          return ERROR_DEVICE_NOT_CONNECTED;
@@ -1513,7 +1516,7 @@ index a91edbe..ae120d6 100644
  
      xi_vib.wLeftMotorSpeed = pVibration->wLeftMotorSpeed;
      xi_vib.wRightMotorSpeed = pVibration->wRightMotorSpeed;
-@@ -251,42 +405,236 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
+@@ -251,42 +406,236 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
  /* ====================  SDL2 GameController backend  ===================== */
  /* ======================================================================== */
  
@@ -1758,12 +1761,17 @@ index a91edbe..ae120d6 100644
          return ERROR_DEVICE_NOT_CONNECTED;
      }
  
-@@ -335,6 +683,8 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
+@@ -335,6 +684,13 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
      pState->Gamepad.sThumbRY =
          (SHORT)(-1 - SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTY));
  
 +    if (dwPort == 0 && keyboard_enabled())
 +        keyboard_merge(pState);
++    if (dwPort == 0 && xbox_ui_buttons
++        && !xbox_ui_buttons(&pState->Gamepad.wButtons, pState->Gamepad.bAnalogButtons)) {
++        pState->Gamepad.wButtons = 0;
++        memset(pState->Gamepad.bAnalogButtons, 0, sizeof(pState->Gamepad.bAnalogButtons));
++    }
      return ERROR_SUCCESS;
  }
  
@@ -1797,9 +1805,8 @@ index a045752..ac12872 100644
  else()
      # Linux: platform layer (POSIX host primitives) + OpenSSL for crypto.
      find_package(OpenSSL REQUIRED)
-diff --git a/new/src/kernel/guest_ptr.h b/src/kernel/guest_ptr.h
+diff --git a/src/kernel/guest_ptr.h b/src/kernel/guest_ptr.h
 new file mode 100644
-index 0000000..c24d5b4
 --- /dev/null
 +++ b/src/kernel/guest_ptr.h
 @@ -0,0 +1,27 @@
@@ -1830,9 +1837,8 @@ index 0000000..c24d5b4
 +uint32_t xbox_HostToGuest(const void *host);
 +
 +#endif
-diff --git a/new/src/kernel/guest_wasm.c b/src/kernel/guest_wasm.c
+diff --git a/src/kernel/guest_wasm.c b/src/kernel/guest_wasm.c
 new file mode 100644
-index 0000000..45b6a74
 --- /dev/null
 +++ b/src/kernel/guest_wasm.c
 @@ -0,0 +1,113 @@
@@ -4185,9 +4191,8 @@ index 1ad4fff..7ba275f 100644
      ExitProcess(0);
  }
  
-diff --git a/new/src/kernel/kernel_iso.c b/src/kernel/kernel_iso.c
+diff --git a/src/kernel/kernel_iso.c b/src/kernel/kernel_iso.c
 new file mode 100644
-index 0000000..0f08cb1
 --- /dev/null
 +++ b/src/kernel/kernel_iso.c
 @@ -0,0 +1,666 @@
@@ -4857,9 +4862,8 @@ index 0000000..0f08cb1
 +    }
 +    return count;
 +}
-diff --git a/new/src/kernel/kernel_iso.h b/src/kernel/kernel_iso.h
+diff --git a/src/kernel/kernel_iso.h b/src/kernel/kernel_iso.h
 new file mode 100644
-index 0000000..016d2b1
 --- /dev/null
 +++ b/src/kernel/kernel_iso.h
 @@ -0,0 +1,53 @@
@@ -5505,9 +5509,8 @@ index 4ebdfb9..6508945 100644
      default:
          xbox_log(XBOX_LOG_WARN, XBOX_LOG_XBOX,
              "ExQueryNonVolatileSetting: unhandled index 0x%02X", ValueIndex);
-diff --git a/new/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
 new file mode 100644
-index 0000000..2102f59
 --- /dev/null
 +++ b/src/kernel/nv2a_backend.h
 @@ -0,0 +1,99 @@
@@ -9883,7 +9886,7 @@ index 94ff7b2..2a01b28 100644
  /* Report counts at exit, so a run says whether the driver ever looked. */
  void xbox_OhciReport(void);
 diff --git a/src/usb/usb_gamepad.c b/src/usb/usb_gamepad.c
-index bd00f3f..2c1683f 100644
+index bd00f3f..af1ca9f 100644
 --- a/src/usb/usb_gamepad.c
 +++ b/src/usb/usb_gamepad.c
 @@ -12,6 +12,7 @@
@@ -10024,19 +10027,21 @@ index bd00f3f..2c1683f 100644
      /* A disconnected host pad is not an error here: the device is present on
       * the bus either way, it just reports nothing pressed. */
      /* RECOMP_INPUT_DIAG: the whole chain on one line, once a second.
-@@ -611,6 +663,7 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
+@@ -611,6 +663,8 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
      if (xbox_InputGetState((DWORD)pad, &state) != 0) {
          out[2] = synth;
          pad_script_apply(pad, out);
 +        pad_touch_apply(pad, out);
++        xbox_UiPad(out, 20);
          return 20;
      }
  
-@@ -628,5 +681,6 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
+@@ -628,5 +682,7 @@ int usb_gamepad_report(int pad, uint8_t *out, int max)
      out[18] = (uint8_t)(g->sThumbRY & 0xFF);
      out[19] = (uint8_t)((g->sThumbRY >> 8) & 0xFF);
      pad_script_apply(pad, out);
 +    pad_touch_apply(pad, out);
++    xbox_UiPad(out, 20);
      return 20;
  }
 diff --git a/src/usb/usb_gamepad.h b/src/usb/usb_gamepad.h
@@ -10105,9 +10110,8 @@ index 2189a3b..b0f20b5 100644
 -    target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32)
 +    target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32 d3d11 dxgi)
  endif()
-diff --git a/new/src/video/fb_gamma.c b/src/video/fb_gamma.c
+diff --git a/src/video/fb_gamma.c b/src/video/fb_gamma.c
 new file mode 100644
-index 0000000..165eab0
 --- /dev/null
 +++ b/src/video/fb_gamma.c
 @@ -0,0 +1,76 @@
@@ -11168,9 +11172,8 @@ index 08bae4b..f010fb3 100644
 -void xbox_FramebufferWindowSetTitle(const uint16_t *n, int m) { (void)n; (void)m; }
 -void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
  #endif
-diff --git a/new/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
+diff --git a/src/video/fb_present_sdl.c b/src/video/fb_present_sdl.c
 new file mode 100644
-index 0000000..88538a4
 --- /dev/null
 +++ b/src/video/fb_present_sdl.c
 @@ -0,0 +1,679 @@
@@ -11853,9 +11856,8 @@ index 0000000..88538a4
 +}
 +
 +#endif /* !_WIN32 */
-diff --git a/new/src/video/fb_present_web.c b/src/video/fb_present_web.c
+diff --git a/src/video/fb_present_web.c b/src/video/fb_present_web.c
 new file mode 100644
-index 0000000..2bb1150
 --- /dev/null
 +++ b/src/video/fb_present_web.c
 @@ -0,0 +1,283 @@
@@ -12142,9 +12144,8 @@ index 0000000..2bb1150
 +            s_fb_width, s_fb_height);
 +}
 +#endif /* __EMSCRIPTEN__ */
-diff --git a/new/src/video/gpu_present.c b/src/video/gpu_present.c
+diff --git a/src/video/gpu_present.c b/src/video/gpu_present.c
 new file mode 100644
-index 0000000..7b3408b
 --- /dev/null
 +++ b/src/video/gpu_present.c
 @@ -0,0 +1,381 @@
@@ -12529,9 +12530,8 @@ index 0000000..7b3408b
 +    return s_rtv != NULL;
 +}
 +#endif
-diff --git a/new/src/video/gpu_present.h b/src/video/gpu_present.h
+diff --git a/src/video/gpu_present.h b/src/video/gpu_present.h
 new file mode 100644
-index 0000000..8891786
 --- /dev/null
 +++ b/src/video/gpu_present.h
 @@ -0,0 +1,17 @@
@@ -12552,9 +12552,8 @@ index 0000000..8891786
 +void gpu_present_shutdown(void);
 +#endif
 +#endif
-diff --git a/new/src/video/touch_pad.c b/src/video/touch_pad.c
+diff --git a/src/video/touch_pad.c b/src/video/touch_pad.c
 new file mode 100644
-index 0000000..9fedfe4
 --- /dev/null
 +++ b/src/video/touch_pad.c
 @@ -0,0 +1,1068 @@
@@ -13626,9 +13625,8 @@ index 0000000..9fedfe4
 +}
 +
 +#endif /* __ANDROID__ */
-diff --git a/new/src/video/touch_pad.h b/src/video/touch_pad.h
+diff --git a/src/video/touch_pad.h b/src/video/touch_pad.h
 new file mode 100644
-index 0000000..9eae157
 --- /dev/null
 +++ b/src/video/touch_pad.h
 @@ -0,0 +1,32 @@
@@ -13664,12 +13662,11 @@ index 0000000..9eae157
 +int touch_pad_enabled(void);
 +
 +#endif /* XBOX_TOUCH_PAD_H */
-diff --git a/new/src/video/ui_overlay.c b/src/video/ui_overlay.c
+diff --git a/src/video/ui_overlay.c b/src/video/ui_overlay.c
 new file mode 100644
-index 0000000..f91430f
 --- /dev/null
 +++ b/src/video/ui_overlay.c
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,38 @@
 +/* ui_overlay.h: the port's hooks, defined once for whichever presenter is
 + * built (fb_present.c on Windows, fb_present_sdl.c elsewhere). */
 +#include "ui_overlay.h"
@@ -13678,6 +13675,8 @@ index 0000000..f91430f
 +int  (*volatile xbox_ui_key)(int vk, int down);
 +int  (*volatile xbox_ui_touch)(float x, float y, int phase);
 +int  (*volatile xbox_ui_blocks_input)(void);
++int  (*volatile xbox_ui_pad)(uint8_t *report, int len);
++int  (*volatile xbox_ui_buttons)(unsigned short *buttons, unsigned char *analog);
 +
 +void xbox_UiDraw(uint32_t *px, uint32_t w, uint32_t h)
 +{
@@ -13699,12 +13698,18 @@ index 0000000..f91430f
 +{
 +    return xbox_ui_blocks_input ? xbox_ui_blocks_input() : 0;
 +}
-diff --git a/new/src/video/ui_overlay.h b/src/video/ui_overlay.h
++
++int xbox_UiPad(uint8_t *report, int len)
++{
++    if (!xbox_ui_pad || !report || len < 20)
++        return 1;
++    return xbox_ui_pad(report, len);
++}
+diff --git a/src/video/ui_overlay.h b/src/video/ui_overlay.h
 new file mode 100644
-index 0000000..f1de383
 --- /dev/null
 +++ b/src/video/ui_overlay.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,53 @@
 +/*
 + * ui_overlay.h -- a port's own screens, over the presented image.
 + *
@@ -13736,6 +13741,16 @@ index 0000000..f1de383
 +/* 1 while the port's screen is up and the title must not see input. */
 +extern int (*volatile xbox_ui_blocks_input)(void);
 +
++/* The finished pad report, before the title reads it: a port screen inspects
++ * the buttons and returns 0 to swallow them (the report is neutralised, the
++ * device and its stick values stay). Called on the input thread. */
++extern int (*volatile xbox_ui_pad)(uint8_t *report, int len);
++
++/* The title's own pad state, on the path the title actually polls: `buttons`
++ * points at XINPUT_GAMEPAD.wButtons, `analog` at its eight pressure bytes.
++ * Return 0 to swallow the press (both are zeroed by the caller). */
++extern int (*volatile xbox_ui_buttons)(unsigned short *buttons, unsigned char *analog);
++
 +/* The presenter's own frame counter (F3 on a desktop window), for a port that
 + * offers it as a setting. A no-op where the presenter has none. */
 +void xbox_FramebufferSetFpsOverlay(int on);
@@ -13745,6 +13760,7 @@ index 0000000..f1de383
 +int  xbox_UiKey(int vk, int down);
 +int  xbox_UiTouch(float x, float y, int phase);
 +int  xbox_UiBlocksInput(void);
++int  xbox_UiPad(uint8_t *report, int len);
 +
 +#endif /* XBOX_UI_OVERLAY_H */
 diff --git a/src/video/video_player.h b/src/video/video_player.h
@@ -13894,9 +13910,8 @@ index 8e9325e..e2089b0 100644
  /* ================================================================
   * Register name aliases for generated code
   *
-diff --git a/new/tests/iso_image/README.md b/tests/iso_image/README.md
+diff --git a/tests/iso_image/README.md b/tests/iso_image/README.md
 new file mode 100644
-index 0000000..b389a55
 --- /dev/null
 +++ b/tests/iso_image/README.md
 @@ -0,0 +1,33 @@
@@ -13933,9 +13948,8 @@ index 0000000..b389a55
 +`121` is the 120 files under `data/` plus `default.xbe`; the byte count is the
 +tree's total, so a short read anywhere shows up as a mismatch rather than as a
 +plausible-looking success.
-diff --git a/new/tests/iso_image/run.bat b/tests/iso_image/run.bat
+diff --git a/tests/iso_image/run.bat b/tests/iso_image/run.bat
 new file mode 100644
-index 0000000..42df01e
 --- /dev/null
 +++ b/tests/iso_image/run.bat
 @@ -0,0 +1,26 @@
@@ -13965,9 +13979,8 @@ index 0000000..42df01e
 +:usage
 +echo usage: run.bat "<disc image>" "<extracted tree>"
 +exit /b 2
-diff --git a/new/tests/iso_image/test_main.c b/tests/iso_image/test_main.c
+diff --git a/tests/iso_image/test_main.c b/tests/iso_image/test_main.c
 new file mode 100644
-index 0000000..dac3de1
 --- /dev/null
 +++ b/tests/iso_image/test_main.c
 @@ -0,0 +1,258 @@
