@@ -1,6 +1,6 @@
 # SSX3RecompAndroid
 
-[![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/434-ssx-3/)
+[![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/1080-ssx-3/)
 
 An **Android port** of [ssx3-recomp](https://github.com/koenhendriks/SSX3-recomp), the static
 recompilation of **SSX 3** (original Xbox, PAL): the game's PowerPC code is recompiled to
